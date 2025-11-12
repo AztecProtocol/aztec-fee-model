@@ -23,10 +23,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+    <html lang="en" className="theme-parchment">
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`} style={{minHeight:"100vh"}}>
         {children}
       </body>
     </html>
