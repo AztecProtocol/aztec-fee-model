@@ -28,25 +28,30 @@ const fmtNum = (n: number, d = 0) => (isFinite(n) ? n.toLocaleString(undefined, 
 // Internal variable names still use `blockTime` / `blocksPerEpoch` for the slot duration /
 // slots-per-epoch (historical naming); user-facing labels use Slot terminology.
 interface NetworkParams { tps: number; blockTime: number; blocksPerEpoch: number; blocksPerSlot: number; maxTxPerCheckpoint: number; manaPerTx: number; bytesPerTxDA: number; bytesPerBlob: number; maxBlobsPerEthBlock: number; targetBlobsPerEthBlock: number; }
-interface CostParams { ethPrice: number; l1GasPriceGwei: number; l1ExecGasPerBlock: number; blobGasPriceGwei: number; proofVerifyGasPerEpoch: number; proverComputeUSDPerTx: number; }
+interface CostParams { ethPrice: number; l1GasPriceGwei: number; l1ExecGasPerBlock: number; blobGasPriceGwei: number; proofVerifyGasPerEpoch: number; provingCostPerManaWei: number; }
 interface CongestionParams { minMultiplier: number; manaTarget: number; manaLimit: number; tipPctOfBase: number; proverShareOfUnburnedBase: number; blobsPerBlockPolicy: number; }
-interface GovParams { maxSupplyTokens: number; circulatingPct: number; stakeRatePct: number; issuanceRateOnMaxPct: number; tokenPriceUSD: number; operatorIssuanceSeqSharePct: number; operatorIssuanceProvSharePct: number; }
+interface GovParams { maxSupplyTokens: number; circulatingPct: number; stakeRatePct: number; checkpointRewardAZTEC: number; issuanceRateOnMaxPct: number; tokenPriceUSD: number; operatorIssuanceSeqSharePct: number; operatorIssuanceProvSharePct: number; }
 interface SequencerParams { targetCommitteeSize: number; minSequencerStake: number; stakePerSequencer: number; proofSubmissionEpochs: number; }
 
 const DEFAULT: { net: NetworkParams; cost: CostParams; cong: CongestionParams; gov: GovParams; seq: SequencerParams } = {
   // maxBlobsPerEthBlock = 21, targetBlobsPerEthBlock = 14 reflect post-Fusaka mainnet after
   // BPO2 (activated 2026-01-07). Fusaka introduced PeerDAS and made target/max independently
   // tunable via Blob Parameter Only forks; see EIP-7892.
-  net: { tps: 1, blockTime: 72, blocksPerEpoch: 32, blocksPerSlot: 6, maxTxPerCheckpoint: 72, manaPerTx: 50_000, bytesPerTxDA: 1200, bytesPerBlob: 131_072, maxBlobsPerEthBlock: 21, targetBlobsPerEthBlock: 14 },
-  // l1ExecGasPerBlock: 325K from gas_benchmark.md. It already includes setupEpoch amortization
-  // (setupEpoch is called from propose and is only expensive at epoch boundaries; rest is a no-op).
-  // Extra gas for signal/vote casting (e.g. proposeAndVote via Multicall3) is not modeled here —
-  // adds ~50K per proposal only on slots where the sequencer casts a governance vote.
-  // proofVerifyGasPerEpoch: 3.5M on Alpha (unoptimized verifier). gas_benchmark.md shows ~900K
-  // but that measurement excludes the actual SNARK verification; real on-chain cost is ~3.5M.
-  cost: { ethPrice: 2200, l1GasPriceGwei: 1, l1ExecGasPerBlock: 325_000, blobGasPriceGwei: 1, proofVerifyGasPerEpoch: 3_500_000, proverComputeUSDPerTx: 0.003 },
-  cong: { minMultiplier: 1.1, manaTarget: 75_000_000, manaLimit: 150_000_000, tipPctOfBase: 10, proverShareOfUnburnedBase: 0.3, blobsPerBlockPolicy: 9 },
-  gov: { maxSupplyTokens: 10_350_000_000, circulatingPct: 28.60, stakeRatePct: 24.87, issuanceRateOnMaxPct: 2.12, tokenPriceUSD: 0.02, operatorIssuanceSeqSharePct: 70, operatorIssuanceProvSharePct: 30 },
+  net: { tps: 0.05, blockTime: 72, blocksPerEpoch: 32, blocksPerSlot: 6, maxTxPerCheckpoint: 72, manaPerTx: 800_000, bytesPerTxDA: 1200, bytesPerBlob: 131_072, maxBlobsPerEthBlock: 21, targetBlobsPerEthBlock: 14 },
+  // l1ExecGasPerBlock: 300K (FeeLib.sol:60 L1_GAS_PER_CHECKPOINT_PROPOSED). Includes setupEpoch
+  // amortization (setupEpoch is called from propose, only expensive at epoch boundaries).
+  // proofVerifyGasPerEpoch: 3.6M (FeeLib.sol:61 L1_GAS_PER_EPOCH_VERIFIED).
+  // provingCostPerManaWei: 25M wei (Rollup.getProvingCostPerManaInEth()). The on-chain
+  // oracle-reported proving compute charge per mana; per-tx USD is derived.
+  cost: { ethPrice: 2200, l1GasPriceGwei: 1, l1ExecGasPerBlock: 300_000, blobGasPriceGwei: 1, proofVerifyGasPerEpoch: 3_600_000, provingCostPerManaWei: 25_000_000 },
+  // manaTarget: 75M, manaLimit: 150M (verified live via cast getManaTarget()/getManaLimit()
+  // on Rollup at 0xae20...4962, 2026-04-27).
+  // blobsPerBlockPolicy: 3 (FeeLib.sol:72 BLOBS_PER_CHECKPOINT). User-billed DA constant.
+  cong: { minMultiplier: 1.0, manaTarget: 75_000_000, manaLimit: 150_000_000, tipPctOfBase: 0, proverShareOfUnburnedBase: 0.3, blobsPerBlockPolicy: 3 },
+  // checkpointRewardAZTEC: 500 AZTEC/slot (Rollup.getCheckpointReward()). issuanceRateOnMaxPct
+  // is now DERIVED from this × slotsPerYear / maxSupplyTokens (kept in interface for downstream
+  // compatibility; the auto-derive logic in the component overrides any manual value).
+  gov: { maxSupplyTokens: 10_350_000_000, circulatingPct: 28.60, stakeRatePct: 24.87, checkpointRewardAZTEC: 500, issuanceRateOnMaxPct: 2.12, tokenPriceUSD: 0.02, operatorIssuanceSeqSharePct: 70, operatorIssuanceProvSharePct: 30 },
   seq: { targetCommitteeSize: 48, minSequencerStake: 190_000, stakePerSequencer: 200_000, proofSubmissionEpochs: 1 }
 };
 
@@ -131,10 +136,12 @@ function useModel(net: NetworkParams, cost: CostParams, cong: CongestionParams, 
     const seqCostPerManaUSD_BILLED = l1USDPerBlock_Sequencer_BILLED / Math.max(1e-9, cong.manaTarget);
 
     const proverVerifyPerManaUSD = l1USDPerBlock_Prover_ACTUAL / Math.max(1e-9, cong.manaTarget);
-    const proverComputeUSD_tx_ACTUAL = cost.proverComputeUSDPerTx;
-    const proverComputeUSD_tx_BILLED = cost.proverComputeUSDPerTx * (1 + proverPremiumPct / 100);
-    const proverComputePerManaUSD_ACTUAL = proverComputeUSD_tx_ACTUAL / Math.max(1, net.manaPerTx);
-    const proverComputePerManaUSD_BILLED = proverComputeUSD_tx_BILLED / Math.max(1, net.manaPerTx);
+    // Proving compute cost: oracle-reported per-mana value in ETH wei, scaled to USD per mana.
+    const proverComputePerManaUSD_ACTUAL = cost.provingCostPerManaWei * 1e-18 * cost.ethPrice;
+    const proverComputePerManaUSD_BILLED = proverComputePerManaUSD_ACTUAL * (1 + proverPremiumPct / 100);
+    // Derived per-tx forms (kept for downstream display compatibility).
+    const proverComputeUSD_tx_ACTUAL = proverComputePerManaUSD_ACTUAL * net.manaPerTx;
+    const proverComputeUSD_tx_BILLED = proverComputePerManaUSD_BILLED * net.manaPerTx;
 
     const baseComponentPerManaUSD_ACTUAL = seqCostPerManaUSD_ACTUAL + proverVerifyPerManaUSD + proverComputePerManaUSD_ACTUAL;
     const baseComponentPerManaUSD_BILLED = seqCostPerManaUSD_BILLED + proverVerifyPerManaUSD + proverComputePerManaUSD_BILLED;
@@ -456,7 +463,17 @@ export default function AztecFeeModel_V6(){
     if(stage === "Beta") setUserWillingUSD(0.05);
   },[stage]);
   // Derive token price from assumed FDV: price = FDV / max supply
-  const govForModel: GovParams = gov.maxSupplyTokens > 0 ? { ...gov, tokenPriceUSD: valuationUSD / gov.maxSupplyTokens } : gov;
+  // Derive issuanceRateOnMaxPct from the on-chain primary value `checkpointRewardAZTEC`:
+  //   annualIssuance = checkpointReward × slotsPerYear
+  //   issuanceRate   = annualIssuance / maxSupply × 100
+  // This way users adjust the protocol's reward-per-slot directly and the inflation rate auto-tracks.
+  const slotsPerYearForIssuance = (365 * 24 * 3600) / Math.max(1, net.blockTime);
+  const derivedIssuanceRateOnMaxPct = gov.maxSupplyTokens > 0
+    ? (gov.checkpointRewardAZTEC * slotsPerYearForIssuance / gov.maxSupplyTokens) * 100
+    : 0;
+  const govForModel: GovParams = gov.maxSupplyTokens > 0
+    ? { ...gov, tokenPriceUSD: valuationUSD / gov.maxSupplyTokens, issuanceRateOnMaxPct: derivedIssuanceRateOnMaxPct }
+    : gov;
   const m = useModel(net, cost, cong, govForModel, seq, oraclePremiumPct);
 
   // Intentionally omitting debug identity checks to satisfy lint rules
@@ -464,25 +481,87 @@ export default function AztecFeeModel_V6(){
   // Currency-conversion helpers: protocol-native denominations (ETH for L1 costs, AZTEC for rewards/fees/burn).
   const toETH = (usd: number) => cost.ethPrice > 0 ? usd / cost.ethPrice : 0;
   const toAZTEC = (usd: number) => govForModel.tokenPriceUSD > 0 ? usd / govForModel.tokenPriceUSD : 0;
+  // Derived: per-tx prover compute cost in USD. Drives downstream displays/calculations from
+  // the on-chain primary `provingCostPerManaWei` (oracle-reported wei of ETH per mana).
+  const proverComputeUSDPerTx = cost.provingCostPerManaWei * 1e-18 * cost.ethPrice * net.manaPerTx;
 
-  // Live prices (Etherscan + public RPC) cached in localStorage for 1h.
+  // Live prices (Etherscan + public RPC + on-chain Rollup state) cached in localStorage for 1h.
+  // Auto-applies once per session; user adjustments override.
   const prices = usePrices();
   const [pricesApplied, setPricesApplied] = useState<boolean>(false);
   useEffect(() => {
     if (!prices.data || pricesApplied) return;
     const p = prices.data;
-    let changed = false;
+    const ps = p.protocolState;
+
+    // 1. Cost-side updates.
     const nextCost = { ...cost };
-    if (p.ethPriceUSD && p.ethPriceUSD > 0) { nextCost.ethPrice = p.ethPriceUSD; changed = true; }
-    const gasGwei = p.gasPriceGwei.avg30d ?? p.gasPriceGwei.current;
-    if (gasGwei && gasGwei > 0) { nextCost.l1GasPriceGwei = gasGwei; changed = true; }
-    if (p.blobGasPriceGwei && p.blobGasPriceGwei > 0) { nextCost.blobGasPriceGwei = p.blobGasPriceGwei; changed = true; }
-    if (changed) setCost(nextCost);
-    if (p.aztecPriceUSD && p.aztecPriceUSD > 0 && gov.maxSupplyTokens > 0) {
-      setValuationUSD(p.aztecPriceUSD * gov.maxSupplyTokens);
+    let costChanged = false;
+    if (p.ethPriceUSD && p.ethPriceUSD > 0) { nextCost.ethPrice = p.ethPriceUSD; costChanged = true; }
+    // Prefer on-chain L1 fee oracle (lagged but authoritative) over Etherscan market price.
+    if (ps?.l1BaseFeeWei && ps.l1BaseFeeWei > 0) {
+      nextCost.l1GasPriceGwei = ps.l1BaseFeeWei / 1e9;
+      costChanged = true;
+    } else {
+      const gasGwei = p.gasPriceGwei.avg30d ?? p.gasPriceGwei.current;
+      if (gasGwei && gasGwei > 0) { nextCost.l1GasPriceGwei = gasGwei; costChanged = true; }
     }
+    if (ps?.l1BlobFeeWei && ps.l1BlobFeeWei > 0) {
+      nextCost.blobGasPriceGwei = ps.l1BlobFeeWei / 1e9;
+      costChanged = true;
+    } else if (p.blobGasPriceGwei && p.blobGasPriceGwei > 0) {
+      nextCost.blobGasPriceGwei = p.blobGasPriceGwei;
+      costChanged = true;
+    }
+    if (ps?.provingCostPerManaWei && ps.provingCostPerManaWei > 0) {
+      nextCost.provingCostPerManaWei = ps.provingCostPerManaWei;
+      costChanged = true;
+    }
+    if (costChanged) setCost(nextCost);
+
+    // 2. Mana / governance constants (from Rollup contract).
+    if (ps) {
+      const nextCong = { ...cong };
+      let congChanged = false;
+      if (ps.manaTarget && ps.manaTarget > 0) { nextCong.manaTarget = ps.manaTarget; congChanged = true; }
+      if (ps.manaLimit && ps.manaLimit > 0) { nextCong.manaLimit = ps.manaLimit; congChanged = true; }
+      if (congChanged) setCong(nextCong);
+
+      const nextNet = { ...net };
+      let netChanged = false;
+      if (ps.slotDurationSec && ps.slotDurationSec > 0) { nextNet.blockTime = ps.slotDurationSec; netChanged = true; }
+      if (ps.epochDurationSlots && ps.epochDurationSlots > 0) { nextNet.blocksPerEpoch = ps.epochDurationSlots; netChanged = true; }
+      if (netChanged) setNet(nextNet);
+
+      const nextGov = { ...gov };
+      let govChanged = false;
+      if (ps.checkpointRewardAZTEC && ps.checkpointRewardAZTEC > 0) {
+        nextGov.checkpointRewardAZTEC = ps.checkpointRewardAZTEC;
+        govChanged = true;
+      }
+      if (govChanged) setGov(nextGov);
+
+      const nextSeq = { ...seq };
+      let seqChanged = false;
+      if (ps.proofSubmissionEpochs && ps.proofSubmissionEpochs > 0) {
+        nextSeq.proofSubmissionEpochs = ps.proofSubmissionEpochs;
+        seqChanged = true;
+      }
+      if (seqChanged) setSeq(nextSeq);
+    }
+
+    // 3. AZTEC token price: prefer on-chain ethPerFeeAsset × ETH price (always self-consistent)
+    //    over CMC market price (which may diverge from the oracle).
+    const onChainTokenPriceUSD = (ps?.ethPerFeeAssetE12 && p.ethPriceUSD)
+      ? (ps.ethPerFeeAssetE12 / 1e12) * p.ethPriceUSD
+      : null;
+    const tokenPrice = onChainTokenPriceUSD ?? p.aztecPriceUSD;
+    if (tokenPrice && tokenPrice > 0 && gov.maxSupplyTokens > 0) {
+      setValuationUSD(tokenPrice * gov.maxSupplyTokens);
+    }
+
     setPricesApplied(true);
-  }, [prices.data, pricesApplied, cost, gov.maxSupplyTokens]);
+  }, [prices.data, pricesApplied, cost, cong, net, gov, seq]);
 
   const headroomUSD = Math.max(0, userWillingUSD - m.totalUserFeeUSD_tx);
 
@@ -559,7 +638,7 @@ export default function AztecFeeModel_V6(){
   // how much of their fee share is compensation for compute vs other components. Not a "cost" here:
   // actual hardware cost depends on each prover's rig and is excluded (like sequencer infrastructure).
   const thisProverTxPerYear = m.txPerBlock * proverBlocksPerYear * selfC;
-  const thisProverOracleComputeSubsidyUSDPerYear = cost.proverComputeUSDPerTx * thisProverTxPerYear;
+  const thisProverOracleComputeSubsidyUSDPerYear = proverComputeUSDPerTx * thisProverTxPerYear;
   // L1 submission cost: one on-chain verify per epoch; whoever submits first pays. Assume this
   // prover's L1 submission rate matches their effective annual share (submitter picked proportionally).
   const verifyUSDPerEpoch = cost.proofVerifyGasPerEpoch * (cost.l1GasPriceGwei * 1e-9) * cost.ethPrice;
@@ -578,7 +657,7 @@ export default function AztecFeeModel_V6(){
   const provCostB = m.proverOnchainUSDPerBlock_FIXED;
 
   const subsidyUSD_tx = m.proverSubsidyUSDPerBlock_FIXED / Math.max(1, m.txPerBlock);
-  const nonETHCosts_tx = cost.proverComputeUSDPerTx + subsidyUSD_tx;
+  const nonETHCosts_tx = proverComputeUSDPerTx + subsidyUSD_tx;
 
   const seqNetPos_tx = Math.max(0, m.seqNetUSD_tx);
   const provNetPos_tx = Math.max(0, m.provNetUSD_tx);
@@ -695,11 +774,11 @@ export default function AztecFeeModel_V6(){
         tip.sub = `= ${fmtUSD(m.proverSubsidyUSDPerBlock_FIXED,4)}`;
       }else{
         tip.eq = "nonETHCosts_tx = proverComputeUSDPerTx + subsidyPerBlock/txPerBlock";
-        tip.sub = `${fmtUSD(cost.proverComputeUSDPerTx,6)} + ${fmtUSD(m.proverSubsidyUSDPerBlock_FIXED,6)} / ${fmtNum(m.txPerBlock,2)} = ${fmtUSD(cost.proverComputeUSDPerTx + (m.proverSubsidyUSDPerBlock_FIXED/Math.max(1,m.txPerBlock)),6)}`;
+        tip.sub = `${fmtUSD(proverComputeUSDPerTx,6)} + ${fmtUSD(m.proverSubsidyUSDPerBlock_FIXED,6)} / ${fmtNum(m.txPerBlock,2)} = ${fmtUSD(proverComputeUSDPerTx + (m.proverSubsidyUSDPerBlock_FIXED/Math.max(1,m.txPerBlock)),6)}`;
       }
     } else if (k === "prov") {
       tip.eq = "provNetUSD_tx = (baseComponentPerManaUSD_BILLED × proverShare × manaPerTx) − (l1USDPerTx_Verify + proverComputeUSD_tx)";
-      tip.sub = `= (${baseComp.toFixed(8)} × ${(cong.proverShareOfUnburnedBase*100).toFixed(1)}% × ${fmtNum(mana,0)}) − (${fmtUSD(m.l1USDPerTx_Verify,6)} + ${fmtUSD(cost.proverComputeUSDPerTx,6)}) = ${fmtUSD(m.provNetUSD_tx,6)}`;
+      tip.sub = `= (${baseComp.toFixed(8)} × ${(cong.proverShareOfUnburnedBase*100).toFixed(1)}% × ${fmtNum(mana,0)}) − (${fmtUSD(m.l1USDPerTx_Verify,6)} + ${fmtUSD(proverComputeUSDPerTx,6)}) = ${fmtUSD(m.provNetUSD_tx,6)}`;
     } else if (k === "seq") {
       tip.eq = "seqNetUSD_tx = (baseComponentPerManaUSD_BILLED × (1 − proverShare) × manaPerTx + feeTipUSD_tx) − (l1USDPerTx_DA + seqFixedUSDPerTx)";
       tip.sub = `= (${baseComp.toFixed(8)} × ${(100 - cong.proverShareOfUnburnedBase*100).toFixed(1)}% × ${fmtNum(mana,0)} + ${fmtUSD(m.feeTipUSD_tx,6)}) − (${fmtUSD(m.l1USDPerTx_DA,6)} + ${fmtUSD(m.seqFixedUSDPerTx,6)}) = ${fmtUSD(m.seqNetUSD_tx,6)}`;
@@ -725,9 +804,10 @@ export default function AztecFeeModel_V6(){
 
   return (
     <div className="p-6 grid grid-cols-1 xl:grid-cols-12 gap-6">
-      <Card className="shadow-sm xl:col-span-12"><CardHeader className="pb-3"><CardTitle>Live Market Data (Etherscan + public RPC)</CardTitle></CardHeader><CardContent>
+      <Card className="shadow-sm xl:col-span-12"><CardHeader className="pb-3"><CardTitle>Live Market Data &amp; On-Chain Protocol State</CardTitle></CardHeader><CardContent>
         {(() => {
           const p = prices.data;
+          const ps = p?.protocolState;
           const fmtAgo = (d: Date | null) => {
             if (!d) return "never";
             const secs = Math.floor((Date.now() - d.getTime()) / 1000);
@@ -736,13 +816,20 @@ export default function AztecFeeModel_V6(){
             return `${Math.floor(secs/3600)}h ago`;
           };
           const fmtTime = (d: Date | null) => d ? d.toLocaleString() : "-";
+          // Compute the on-chain-derived AZTEC price from ethPerFeeAsset × ETH price.
+          // This is what users actually pay against (not the market price).
+          const onChainTokenUSD = (ps?.ethPerFeeAssetE12 && p?.ethPriceUSD)
+            ? (ps.ethPerFeeAssetE12 / 1e12) * p.ethPriceUSD : null;
+          // Convert mana min fee from on-chain wei AZTEC into USD at on-chain token price for display.
+          const manaMinFeeUSD = (ps?.manaMinFeeWeiFeeAsset && onChainTokenUSD)
+            ? (ps.manaMinFeeWeiFeeAsset / 1e18) * onChainTokenUSD : null;
           return (
-            <div className="space-y-2">
+            <div className="space-y-3">
+              <div className="text-xs font-medium text-slate-600">Market Prices</div>
               <div className="flex items-center gap-4 text-sm flex-wrap">
                 <div><span className="text-slate-500">ETH:</span> <span className="font-medium tabular-nums">{p?.ethPriceUSD ? fmtUSD(p.ethPriceUSD, 2) : "-"}</span></div>
-                <div><span className="text-slate-500">AZTEC:</span> <span className="font-medium tabular-nums">{p?.aztecPriceUSD ? fmtUSD(p.aztecPriceUSD, 4) : "-"}</span></div>
-                <div><span className="text-slate-500">Gas (30d avg):</span> <span className="font-medium tabular-nums">{p?.gasPriceGwei.avg30d ? `${p.gasPriceGwei.avg30d.toFixed(2)} gwei` : (p?.gasPriceGwei.current ? `${p.gasPriceGwei.current.toFixed(2)} gwei (current)` : "-")}</span></div>
-                <div><span className="text-slate-500">Blob gas (current):</span> <span className="font-medium tabular-nums">{p?.blobGasPriceGwei != null ? `${p.blobGasPriceGwei.toFixed(4)} gwei` : "-"}</span></div>
+                <div><span className="text-slate-500">AZTEC (CMC market):</span> <span className="font-medium tabular-nums">{p?.aztecPriceUSD ? fmtUSD(p.aztecPriceUSD, 4) : "-"}</span></div>
+                <div><span className="text-slate-500">AZTEC (on-chain oracle):</span> <span className="font-medium tabular-nums">{onChainTokenUSD ? fmtUSD(onChainTokenUSD, 4) : "-"}</span></div>
                 <div className="ml-auto flex items-center gap-2">
                   <span className="text-xs text-slate-500" title={fmtTime(prices.lastFetched)}>Updated {fmtAgo(prices.lastFetched)}{prices.cacheHit ? " (cached)" : ""}</span>
                   <button onClick={prices.refresh} disabled={prices.loading} className="text-xs px-2 py-1 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50">
@@ -750,8 +837,35 @@ export default function AztecFeeModel_V6(){
                   </button>
                 </div>
               </div>
+
+              <div className="text-xs font-medium text-slate-600 pt-1 border-t">L1 Fee Oracle (proposer-updated, ~5 min lag)</div>
+              <div className="flex items-center gap-4 text-sm flex-wrap">
+                <div><span className="text-slate-500">L1 base fee:</span> <span className="font-medium tabular-nums">{ps?.l1BaseFeeWei != null ? `${(ps.l1BaseFeeWei / 1e9).toFixed(4)} gwei` : "-"}</span></div>
+                <div><span className="text-slate-500">L1 blob base fee:</span> <span className="font-medium tabular-nums">{ps?.l1BlobFeeWei != null ? `${(ps.l1BlobFeeWei / 1e9).toFixed(6)} gwei` : "-"}</span></div>
+                <div><span className="text-slate-500">Etherscan 30d avg gas:</span> <span className="font-medium tabular-nums">{p?.gasPriceGwei.avg30d ? `${p.gasPriceGwei.avg30d.toFixed(2)} gwei` : "-"}</span></div>
+                <div><span className="text-slate-500">Etherscan current gas:</span> <span className="font-medium tabular-nums">{p?.gasPriceGwei.current ? `${p.gasPriceGwei.current.toFixed(2)} gwei` : "-"}</span></div>
+              </div>
+
+              <div className="text-xs font-medium text-slate-600 pt-1 border-t">Aztec Rollup State (governance-set; effectively static)</div>
+              <div className="flex items-center gap-4 text-sm flex-wrap">
+                <div><span className="text-slate-500">Mana target:</span> <span className="font-medium tabular-nums">{ps?.manaTarget ? fmtNum(ps.manaTarget, 0) : "-"}</span></div>
+                <div><span className="text-slate-500">Mana limit:</span> <span className="font-medium tabular-nums">{ps?.manaLimit ? fmtNum(ps.manaLimit, 0) : "-"}</span></div>
+                <div><span className="text-slate-500">Proving cost/mana:</span> <span className="font-medium tabular-nums">{ps?.provingCostPerManaWei != null ? `${fmtNum(ps.provingCostPerManaWei, 0)} wei` : "-"}</span></div>
+                <div><span className="text-slate-500">Slot:</span> <span className="font-medium tabular-nums">{ps?.slotDurationSec != null ? `${ps.slotDurationSec}s` : "-"}</span></div>
+                <div><span className="text-slate-500">Epoch:</span> <span className="font-medium tabular-nums">{ps?.epochDurationSlots != null ? `${ps.epochDurationSlots} slots` : "-"}</span></div>
+                <div><span className="text-slate-500">Checkpoint reward:</span> <span className="font-medium tabular-nums">{ps?.checkpointRewardAZTEC != null ? `${fmtNum(ps.checkpointRewardAZTEC, 2)} AZTEC` : "-"}</span></div>
+              </div>
+
+              <div className="text-xs font-medium text-slate-600 pt-1 border-t">Live Min Fee per Mana (derived on-chain)</div>
+              <div className="flex items-center gap-4 text-sm flex-wrap">
+                <div><span className="text-slate-500">In ETH:</span> <span className="font-medium tabular-nums">{ps?.manaMinFeeWeiETH != null ? `${ps.manaMinFeeWeiETH.toExponential(3)} wei/mana` : "-"}</span></div>
+                <div><span className="text-slate-500">In AZTEC:</span> <span className="font-medium tabular-nums">{ps?.manaMinFeeWeiFeeAsset != null ? `${(ps.manaMinFeeWeiFeeAsset / 1e18).toExponential(3)} AZTEC/mana` : "-"}</span></div>
+                <div><span className="text-slate-500">In USD (oracle):</span> <span className="font-medium tabular-nums">{manaMinFeeUSD != null ? `${manaMinFeeUSD.toExponential(3)} $/mana` : "-"}</span></div>
+                <div><span className="text-slate-500">Per tx (current manaPerTx):</span> <span className="font-medium tabular-nums">{manaMinFeeUSD != null ? fmtUSD(manaMinFeeUSD * net.manaPerTx, 6) : "-"}</span></div>
+              </div>
+
               <div className="text-[11px] text-slate-500">
-                Gas price is a 30-day rolling average of daily averages from Etherscan. Blob gas is current (no free historical endpoint). Cached in your browser for 1 hour to limit API calls. Auto-applies on first load of a session; further changes to sliders override the live values.
+                ETH/AZTEC prices update freely; L1 fee oracle is proposer-updated (~5 min cadence); ethPerFeeAsset can move ±1%/slot; mana target / proving cost / slot/epoch durations are governance constants. The dashboard auto-applies these on first load and prefers on-chain values over market prices for fee calculations. Cached in your browser for 1 hour.
               </div>
               {p && p.errors && p.errors.length > 0 && (
                 <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
@@ -916,127 +1030,124 @@ export default function AztecFeeModel_V6(){
       </CardContent></Card>
 
       <div className="xl:col-span-5 space-y-6">
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Assumptions</CardTitle></CardHeader><CardContent className="space-y-4">
-          <NumberSlider label="Assumed FDV (USD)" min={50_000_000} max={2_000_000_000} step={5_000_000} value={valuationUSD} onChange={setValuationUSD} prefix="$" />
-          <PercentSlider label="Staked Share of Circulating (%)" value={gov.stakeRatePct} onChange={(v)=> setGov({ ...gov, stakeRatePct: v })} />
-          <PercentSlider label="Annual Issuance on Max Supply (%)" value={gov.issuanceRateOnMaxPct} onChange={(v)=> setGov({ ...gov, issuanceRateOnMaxPct: v })} />
-          
-          <PercentSlider label="Issuance Share to Sequencers (%)" value={gov.operatorIssuanceSeqSharePct} onChange={(v)=> setGov({ ...gov, operatorIssuanceSeqSharePct: v })} />
-          <PercentSlider label="Issuance Share to Provers (%)" value={gov.operatorIssuanceProvSharePct} onChange={(v)=> setGov({ ...gov, operatorIssuanceProvSharePct: v })} />
-        </CardContent></Card>
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Configurable Utilisation</CardTitle></CardHeader><CardContent className="space-y-4">
-          <NumberSlider label={`User Demanded TPS${stage==="Alpha" ? " (Alpha cap ≈ 1)" : ""}`} min={0} max={stage==="Beta" ? 200 : 5} step={0.01} value={net.tps} onChange={(v) => setNet({ ...net, tps: v })} disabled={stage==="Ignition"} />
-          <NumberSlider label="Slot Duration (s)" min={2} max={72} step={1} value={net.blockTime} onChange={(v) => setNet({ ...net, blockTime: v })} disabled={stage==="Ignition"} />
+        {/* ============= GOVERNANCE CONSTANTS ============= */}
+        {/* Everything changeable only via a passed governance proposal. Auto-populated from the
+            on-chain Rollup contract on first load; adjust to simulate alternate parameters. */}
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Governance Constants</CardTitle></CardHeader><CardContent className="space-y-4">
+          <div className="text-[11px] text-slate-500">Protocol parameters set by Aztec governance. Auto-populated from the deployed Rollup contract on first load; adjust to simulate &quot;what if governance changed X&quot;.</div>
+
+          <CardTitle className="text-sm pt-1">Time</CardTitle>
+          <NumberSlider label="Slot Duration (s)" min={2} max={72} step={1} value={net.blockTime} onChange={(v) => setNet({ ...net, blockTime: v })} disabled={stage==="Ignition"} suffix=" s" />
           <NumberSlider label="Slots per Epoch" min={6} max={64} step={1} value={net.blocksPerEpoch} onChange={(v) => setNet({ ...net, blocksPerEpoch: v })} disabled={stage==="Ignition"} />
           <NumberSlider label="Blocks per Slot (sub-blocks bundled per checkpoint)" min={1} max={12} step={1} value={net.blocksPerSlot} onChange={(v) => setNet({ ...net, blocksPerSlot: v })} disabled={stage==="Ignition"} />
-          <NumberSlider label="Max Tx per Checkpoint (hard cap)" min={1} max={10_000} step={1} value={net.maxTxPerCheckpoint} onChange={(v) => setNet({ ...net, maxTxPerCheckpoint: v })} disabled={stage==="Ignition"} />
-          <div className="pt-2 border-t" />
-          <CardTitle className="text-base">Tx Details</CardTitle>
-          <NumberSlider label="Tx Mana Cost (mana/tx)" min={5_000} max={2_000_000} step={1_000} value={net.manaPerTx} onChange={(v) => setNet({ ...net, manaPerTx: v })} disabled={stage==="Ignition"} />
-          <NumberSlider label="Tx DA size (bytes)" min={200} max={200_000} step={50} value={net.bytesPerTxDA} onChange={(v) => setNet({ ...net, bytesPerTxDA: v })} disabled={stage==="Ignition"} />
-          <NumberSlider label="ETH Price (USD)" min={500} max={10000} step={10} value={cost.ethPrice} onChange={(v) => setCost({ ...cost, ethPrice: v })} />
-          <NumberSlider label="L1 Gas Price (gwei)" min={0} max={50} step={0.1} value={cost.l1GasPriceGwei} onChange={(v) => setCost({ ...cost, l1GasPriceGwei: v })} />
-          <NumberSlider label="L1 Blob Gas Price (gwei)" min={0} max={20} step={0.1} value={cost.blobGasPriceGwei} onChange={(v) => setCost({ ...cost, blobGasPriceGwei: v })} />
-          <div className="grid grid-cols-2 gap-2 text-sm"><div className="text-slate-500">Epoch Time</div><div className="text-right font-medium">{fmtNum(m.epochTimeSec, 0)} s</div><div className="text-slate-500">Tx / Slot (demand / mana / DA / cap)</div><div className="text-right">{fmtNum(m.txPerBlockDemand, 2)} / {fmtNum(m.txPerBlockCapacity_mana, 0)} / {fmtNum(m.maxTxPerBlock_byBlob, 0)} / {fmtNum(net.maxTxPerCheckpoint, 0)}</div><div className="text-slate-500">Tx / Slot (effective)</div><div className="text-right font-medium">{fmtNum(m.txPerBlock, 2)}</div><div className="text-slate-500">TPS limits (mana / DA)</div><div className="text-right">{fmtNum(m.tpsLimitByMana, 2)} / {fmtNum(m.tpsLimitByBlobs, 2)}</div></div>
-        </CardContent></Card>
+          <NumberSlider label="Proof Submission Window (epochs)" min={1} max={10} step={1} value={seq.proofSubmissionEpochs} onChange={(v)=> setSeq({ ...seq, proofSubmissionEpochs: v })} suffix=" epochs" />
 
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Congestion & Burn Configuration</CardTitle></CardHeader><CardContent className="space-y-4">
-          <NumberSlider label={`BLOBS_PER_BLOCK (billed constant, per slot)`} min={1} max={100} step={1} value={cong.blobsPerBlockPolicy} onChange={(v) => setCong({ ...cong, blobsPerBlockPolicy: v })} disabled={stage==="Ignition"} />
-          <NumberSlider label="Minimum Congestion Multiplier" min={1} max={20} step={0.01} value={cong.minMultiplier} onChange={(v) => setCong({ ...cong, minMultiplier: v })} disabled={stage==="Ignition"} />
+          <div className="pt-2 border-t" />
+          <CardTitle className="text-sm">Capacity</CardTitle>
           <NumberSlider label="Mana Target per Slot" min={5_000_000} max={200_000_000} step={250_000} value={cong.manaTarget} onChange={(v) => setCong({ ...cong, manaTarget: v, manaLimit: Math.max(v*2, cong.manaLimit) })} />
-          <div className="grid grid-cols-2 gap-2 text-sm"><div className="text-slate-500">Mana Limit per Slot (2× target)</div><div className="text-right font-medium">{fmtNum(cong.manaTarget*2,0)}</div></div>
-          <PercentSlider label="Tip as % of Base" value={cong.tipPctOfBase} onChange={(v) => setCong({ ...cong, tipPctOfBase: v })} disabled={stage==="Ignition"} />
-          <PercentSlider label="Prover share of unburned base" value={cong.proverShareOfUnburnedBase * 100} onChange={(v) => setCong({ ...cong, proverShareOfUnburnedBase: v / 100 })} disabled={stage==="Ignition"} />
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500"><div>Derived: Mana Limit per Slot (2× target)</div><div className="text-right font-medium tabular-nums">{fmtNum(cong.manaTarget*2,0)}</div></div>
+          <NumberSlider label="Max Tx per Checkpoint (hard cap)" min={1} max={10_000} step={1} value={net.maxTxPerCheckpoint} onChange={(v) => setNet({ ...net, maxTxPerCheckpoint: v })} disabled={stage==="Ignition"} />
+          <NumberSlider label="BLOBS_PER_BLOCK (billed constant, per slot)" min={1} max={100} step={1} value={cong.blobsPerBlockPolicy} onChange={(v) => setCong({ ...cong, blobsPerBlockPolicy: v })} disabled={stage==="Ignition"} />
+
+          <div className="pt-2 border-t" />
+          <CardTitle className="text-sm">Rewards & Issuance</CardTitle>
+          <NumberSlider label="Checkpoint Reward (AZTEC / slot)" min={0} max={5000} step={1} value={gov.checkpointRewardAZTEC} onChange={(v)=> setGov({ ...gov, checkpointRewardAZTEC: v })} suffix=" AZTEC" />
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+            <div>Derived: Annual issuance rate</div><div className="text-right tabular-nums">{fmtNum(derivedIssuanceRateOnMaxPct, 3)}% of max supply</div>
+            <div>Derived: Annual issuance</div><div className="text-right tabular-nums">{fmtNum(gov.checkpointRewardAZTEC * slotsPerYearForIssuance, 0)} AZTEC/year</div>
+          </div>
+          <PercentSlider label="Issuance Share to Sequencers (%)" value={gov.operatorIssuanceSeqSharePct} onChange={(v)=> setGov({ ...gov, operatorIssuanceSeqSharePct: v })} />
+          <PercentSlider label="Issuance Share to Provers (%)" value={gov.operatorIssuanceProvSharePct} onChange={(v)=> setGov({ ...gov, operatorIssuanceProvSharePct: v })} />
+          <PercentSlider label="Prover Share of Unburned Base Fee (%)" value={cong.proverShareOfUnburnedBase * 100} onChange={(v) => setCong({ ...cong, proverShareOfUnburnedBase: v / 100 })} disabled={stage==="Ignition"} />
+
+          <div className="pt-2 border-t" />
+          <CardTitle className="text-sm">Fee Market</CardTitle>
+          <NumberSlider label="Minimum Congestion Multiplier" min={1} max={20} step={0.01} value={cong.minMultiplier} onChange={(v) => setCong({ ...cong, minMultiplier: v })} disabled={stage==="Ignition"} />
+
+          <div className="pt-2 border-t" />
+          <CardTitle className="text-sm">L1 Cost Constants</CardTitle>
+          <NumberSlider label="L1 Gas / Checkpoint Proposal" min={50_000} max={2_000_000} step={1_000} value={cost.l1ExecGasPerBlock} onChange={(v)=> setCost({ ...cost, l1ExecGasPerBlock: v })} suffix=" gas" />
+          <NumberSlider label="L1 Gas / Epoch Verification" min={100_000} max={20_000_000} step={10_000} value={cost.proofVerifyGasPerEpoch} onChange={(v)=> setCost({ ...cost, proofVerifyGasPerEpoch: v })} suffix=" gas" />
+          <NumberSlider label="Proving Cost / Mana (wei of ETH)" min={0} max={500_000_000} step={1_000_000} value={cost.provingCostPerManaWei} onChange={(v)=> setCost({ ...cost, provingCostPerManaWei: v })} suffix=" wei" />
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+            <div>Derived: USD / mana</div><div className="text-right tabular-nums">{fmtUSD(cost.provingCostPerManaWei * 1e-18 * cost.ethPrice, 8)}</div>
+            <div>Derived: USD / tx (× current manaPerTx)</div><div className="text-right tabular-nums">{fmtUSD(proverComputeUSDPerTx, 6)}</div>
+          </div>
+
+          <div className="pt-2 border-t" />
+          <CardTitle className="text-sm">Sequencer Set</CardTitle>
+          <NumberSlider label="Target Committee Size" min={4} max={256} step={1} value={seq.targetCommitteeSize} onChange={(v)=> setSeq({ ...seq, targetCommitteeSize: v })} />
+          <NumberSlider label="Min Stake (Ejection Floor)" min={1_000} max={1_000_000} step={1_000} value={seq.minSequencerStake} onChange={(v)=> setSeq({ ...seq, minSequencerStake: v })} suffix=" AZTEC" />
+
+          <div className="pt-2 border-t" />
+          <CardTitle className="text-sm">Ethereum L1 Blobs (post-Fusaka)</CardTitle>
+          <NumberSlider label="Max Blobs / ETH Block (Fusaka ceiling)" min={1} max={50} step={1} value={net.maxBlobsPerEthBlock} onChange={(v)=> setNet({ ...net, maxBlobsPerEthBlock: v })} />
+          <NumberSlider label="Target Blobs / ETH Block (sustainable)" min={1} max={50} step={1} value={net.targetBlobsPerEthBlock} onChange={(v)=> setNet({ ...net, targetBlobsPerEthBlock: v })} />
+
+          <div className="pt-2 border-t" />
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+            <div>Derived: Min Fee</div><div className="text-right font-medium tabular-nums">{fmtUSD(m.baseFeePerManaUSD, 8)} / mana</div>
+            <div>Derived: Min Fee</div><div className="text-right tabular-nums">{fmtNum(m.baseFeePerManaGwei, 8)} gwei / mana</div>
+            <div>Derived: Mana per Gwei</div><div className="text-right tabular-nums">{fmtNum(m.manaPerGwei, 8)} mana / gwei</div>
+          </div>
+        </CardContent></Card>
+
+        {/* ============= NETWORK DEMAND & USER BEHAVIOR ============= */}
+        {/* Things users (collectively) do: how much load, what they're willing to pay, tip behavior. */}
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Network Demand & User Behavior</CardTitle></CardHeader><CardContent className="space-y-4">
+          <NumberSlider label={`User Demanded TPS${stage==="Alpha" ? " (Alpha cap ≈ 1)" : ""}`} min={0} max={stage==="Beta" ? 200 : 5} step={0.01} value={net.tps} onChange={(v) => setNet({ ...net, tps: v })} disabled={stage==="Ignition"} />
+          <NumberSlider label="Tx Mana Cost (mana / tx)" min={5_000} max={2_000_000} step={1_000} value={net.manaPerTx} onChange={(v) => setNet({ ...net, manaPerTx: v })} disabled={stage==="Ignition"} />
+          <NumberSlider label="Tx DA Size (bytes)" min={200} max={200_000} step={50} value={net.bytesPerTxDA} onChange={(v) => setNet({ ...net, bytesPerTxDA: v })} disabled={stage==="Ignition"} />
+          <PercentSlider label="Tip as % of Base Fee" value={cong.tipPctOfBase} onChange={(v) => setCong({ ...cong, tipPctOfBase: v })} disabled={stage==="Ignition"} />
+          <div className="pt-2 border-t" />
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div className="text-slate-500">Derived: Epoch Time</div><div className="text-right font-medium tabular-nums">{fmtNum(m.epochTimeSec, 0)} s</div>
+            <div className="text-slate-500">Tx / Slot (demand / mana / DA / cap)</div><div className="text-right tabular-nums">{fmtNum(m.txPerBlockDemand, 2)} / {fmtNum(m.txPerBlockCapacity_mana, 0)} / {fmtNum(m.maxTxPerBlock_byBlob, 0)} / {fmtNum(net.maxTxPerCheckpoint, 0)}</div>
+            <div className="text-slate-500">Tx / Slot (effective)</div><div className="text-right font-medium tabular-nums">{fmtNum(m.txPerBlock, 2)}</div>
+            <div className="text-slate-500">TPS limits (mana / DA)</div><div className="text-right tabular-nums">{fmtNum(m.tpsLimitByMana, 2)} / {fmtNum(m.tpsLimitByBlobs, 2)}</div>
+          </div>
+        </CardContent></Card>
+
+        {/* ============= MARKET & ORACLE INPUTS ============= */}
+        {/* External market state — ETH price, gas prices (which on-chain oracles will track),
+            AZTEC FDV (sets the tokenPrice oracle), and the prover oracle premium (a market-set %). */}
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Market & Oracle Inputs</CardTitle></CardHeader><CardContent className="space-y-4">
+          <div className="text-[11px] text-slate-500">External market state. Auto-populated from CoinMarketCap (prices) and the on-chain L1 fee oracle on first load. Adjust to simulate alternate market conditions.</div>
+          <NumberSlider label="ETH Price (USD)" min={500} max={10000} step={10} value={cost.ethPrice} onChange={(v) => setCost({ ...cost, ethPrice: v })} prefix="$" />
+          <NumberSlider label="L1 Gas Price (gwei)" min={0} max={50} step={0.1} value={cost.l1GasPriceGwei} onChange={(v) => setCost({ ...cost, l1GasPriceGwei: v })} suffix=" gwei" />
+          <NumberSlider label="L1 Blob Gas Price (gwei)" min={0} max={20} step={0.001} value={cost.blobGasPriceGwei} onChange={(v) => setCost({ ...cost, blobGasPriceGwei: v })} suffix=" gwei" />
+          <NumberSlider label="Assumed FDV (USD)" min={50_000_000} max={2_000_000_000} step={5_000_000} value={valuationUSD} onChange={setValuationUSD} prefix="$" />
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+            <div>Derived: AZTEC token price</div><div className="text-right tabular-nums">{fmtUSD(govForModel.tokenPriceUSD, 4)}</div>
+          </div>
           <PercentSlider label="Prover Oracle Premium (%)" value={oraclePremiumPct} onChange={setOraclePremiumPct} disabled={stage==="Ignition"} />
-          <div className="grid grid-cols-2 gap-2 text-sm"><div className="text-slate-500">Min Fee</div><div className="text-right font-medium">{fmtUSD(m.baseFeePerManaUSD, 8)} / mana</div><div className="text-slate-500">Min Fee</div><div className="text-right">{fmtNum(m.baseFeePerManaGwei, 8)} gwei / mana</div><div className="text-slate-500">Mana per Gwei</div><div className="text-right">{fmtNum(m.manaPerGwei, 8)} mana / gwei</div></div>
         </CardContent></Card>
 
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Operator Economics (What‑if)</CardTitle></CardHeader><CardContent className="space-y-3">
-          <NumberSlider label="Total Stake Operated (AZTEC)" min={10_000} max={500_000_000} step={1} value={opTotalStakeAZTEC} onChange={setOpTotalStakeAZTEC} />
-          <PercentSlider label="Own Stake (% of operated)" value={opOwnStakePct} onChange={setOpOwnStakePct} />
-          <PercentSlider label="Commission on Delegator Rewards (%)" value={opCommissionPct} onChange={setOpCommissionPct} />
-          <div className="grid grid-cols-2 gap-2 text-xs text-slate-500 pt-2 border-t">
-            <div>Sequencers Operated</div><div className="text-right font-medium tabular-nums text-slate-700">{fmtNum(opNumSequencers, 2)}</div>
-            <div>Network Stake Share</div><div className="text-right tabular-nums">{fmtNum(opNetworkStakeSharePct, 2)}%</div>
-            <div>Own Stake</div><div className="text-right tabular-nums">{fmtNum(opOwnStakeAZTEC, 0)} AZTEC ({fmtUSD(opOwnStakeUSD, 2)})</div>
-            <div>Delegated Stake</div><div className="text-right tabular-nums">{fmtNum(opDelegatedStakeAZTEC, 0)} AZTEC ({fmtUSD(delegatorStakeUSD, 2)})</div>
+        {/* ============= NETWORK PARTICIPATION ============= */}
+        {/* Aggregate network state that emerges from staker/holder behavior. */}
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Network Participation</CardTitle></CardHeader><CardContent className="space-y-4">
+          <PercentSlider label="Staked Share of Circulating (%)" value={gov.stakeRatePct} onChange={(v)=> setGov({ ...gov, stakeRatePct: v })} />
+          <PercentSlider label="Circulating Share of Max Supply (%)" value={gov.circulatingPct} onChange={(v)=> setGov({ ...gov, circulatingPct: v })} />
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+            <div>Derived: Circulating supply</div><div className="text-right tabular-nums">{fmtNum(m.circTokens, 0)} AZTEC</div>
+            <div>Derived: Staked supply</div><div className="text-right tabular-nums">{fmtNum(m.stakedTokens, 0)} AZTEC</div>
           </div>
-          <div className="pt-2 border-t" />
-          <div className="text-sm font-medium text-emerald-700">Annual Gross Rewards (fleet)</div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500">Issuance</div><div className="text-right tabular-nums">{fmtNum(opGrossIssuanceAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossIssuanceUSDPerYear, 2)})</span></div>
-            <div className="text-slate-500">Tx Fees</div><div className="text-right tabular-nums">{fmtNum(opGrossFeesAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossFeesUSDPerYear, 2)})</span></div>
-            <div className="text-slate-500 font-medium">Total Gross</div><div className="text-right font-medium tabular-nums">{fmtNum(opGrossTotalAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossTotalUSDPerYear, 2)})</span></div>
-          </div>
-          <div className="text-sm font-medium">Operator Income Split</div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500">From Own Stake (100% kept)</div><div className="text-right tabular-nums">{fmtNum(opFromOwnStakeAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opFromOwnStakeUSDPerYear, 2)})</span></div>
-            <div className="text-slate-500">Commission on Delegator Rewards</div><div className="text-right tabular-nums">{fmtNum(opCommissionIncomeAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opCommissionIncomeUSDPerYear, 2)})</span></div>
-            <div className="text-slate-500 font-medium">Operator Gross Income</div><div className="text-right font-medium tabular-nums">{fmtNum(opGrossIncomeAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossIncomeUSDPerYear, 2)})</span></div>
-            <div className="text-slate-500 text-[11px]">(Delegators keep)</div><div className="text-right text-[11px] text-slate-400 tabular-nums">{fmtNum(delegatorNetRewardsAZTECPerYear, 0)} AZTEC ({fmtUSD(delegatorNetRewardsUSDPerYear, 2)})</div>
-          </div>
-          <div className="text-sm font-medium text-rose-700">Annual Protocol Costs (paid by operator)</div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500">L1 Gas + Blobs</div><div className="text-right tabular-nums">{fmtNum(opL1CostsETHPerYear, 4)} ETH <span className="text-slate-400">({fmtUSD(opL1CostsUSDPerYear, 2)})</span></div>
-            <div className="text-slate-500 font-medium">Total Costs</div><div className="text-right font-medium tabular-nums">{fmtUSD(opTotalCostsUSDPerYear, 2)}</div>
-          </div>
-          <div className="pt-2 border-t" />
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500 font-medium">Pre‑Infrastructure EBITDA / Year</div><div className={`text-right font-semibold tabular-nums ${opNetEBITDAUSDPerYear >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtUSD(opNetEBITDAUSDPerYear, 2)}</div>
-            <div className="text-slate-500">APY on Own Stake (pre‑infra)</div><div className={`text-right font-semibold tabular-nums ${opAPYOnOwnStakePct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtNum(opAPYOnOwnStakePct, 2)}%</div>
-            <div className="text-slate-500">Delegator APY (net of commission)</div><div className="text-right tabular-nums">{fmtNum(delegatorAPYPct, 2)}%</div>
-          </div>
-          <Notes title="Model">
-            <div><b>Infrastructure costs excluded.</b> Only on-chain L1 costs (gas + blobs) are shown. Real-world hosting, monitoring, bandwidth, and ops staff cost must be subtracted separately. Factor that in based on your fleet size and deployment outside the dashboard.</div>
-            <div>Operator runs <code>{fmtNum(opNumSequencers, 1)}</code> sequencers (total stake / stake per sequencer). Rewards per sequencer come from the Per‑Sequencer Economics card.</div>
-            <div>Commission applies only to delegator‑stake rewards. Operator keeps 100% of rewards from own stake + commission % of delegator rewards, pays all L1 costs.</div>
-            <div>APY on own stake = (Net EBITDA / Own Stake Value), pre‑infrastructure.</div>
-          </Notes>
-        </CardContent></Card>
-
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Per-Sequencer Economics</CardTitle></CardHeader><CardContent className="space-y-3">
-          <NumberSlider label="Assumed Stake per Sequencer (AZTEC)" min={1_000} max={2_000_000} step={1} value={seq.stakePerSequencer} onChange={(v)=> setSeq({ ...seq, stakePerSequencer: v })} />
-          <div className="grid grid-cols-2 gap-2 text-xs text-slate-500">
-            <div>Target Committee Size</div><div className="text-right tabular-nums">{seq.targetCommitteeSize}</div>
-            <div>Min Stake (Ejection Floor)</div><div className="text-right tabular-nums">{fmtNum(seq.minSequencerStake, 0)} AZTEC</div>
-            <div>Proof Submission Window</div><div className="text-right tabular-nums">{seq.proofSubmissionEpochs} epoch</div>
-          </div>
-          <div className="pt-2 border-t" />
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500">Approx Active Sequencers</div><div className="text-right font-medium tabular-nums">{fmtNum(m.numActiveSequencers, 0)}</div>
-            <div className="text-slate-500">Slots Proposed / Sequencer / Year</div><div className="text-right tabular-nums">{fmtNum(m.slotsPerSequencerPerYear, 1)}</div>
-            <div className="text-slate-500">Stake Value</div><div className="text-right tabular-nums">{fmtNum(seq.stakePerSequencer, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_stake_USD, 2)})</span></div>
-          </div>
-          <div className="pt-2 border-t" />
-          <div className="text-sm font-medium text-emerald-700">Annual Earnings</div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500">Slot Rewards (issuance, per published checkpoint)</div>
-            <div className="text-right tabular-nums">{fmtNum(m.sequencer_issuance_AZTEC_per_year, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_issuance_USD_per_year, 2)})</span></div>
-            <div className="text-slate-500">Tx Fees</div><div className="text-right tabular-nums">{fmtNum(m.sequencer_fee_earnings_AZTEC_per_year, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_fee_earnings_USD_per_year, 2)})</span></div>
-            <div className="text-slate-500 font-medium">Total</div><div className="text-right font-medium tabular-nums">{fmtNum(m.sequencer_total_earnings_AZTEC_per_year, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_total_earnings_USD_per_year, 2)})</span></div>
-          </div>
-          <div className="text-sm font-medium text-rose-700">Annual Protocol Costs</div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500">L1 Gas + Blobs</div>
-            <div className="text-right tabular-nums">{fmtNum(m.sequencer_L1_costs_ETH_per_year, 4)} ETH <span className="text-slate-400">({fmtUSD(m.sequencer_L1_costs_USD_per_year, 2)})</span></div>
-            <div className="text-slate-500 font-medium">Total Costs</div><div className="text-right font-medium tabular-nums">{fmtUSD(m.sequencer_total_costs_USD_per_year, 2)}</div>
-          </div>
-          <div className="pt-2 border-t" />
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div className="text-slate-500">Net USD / Year</div><div className={`text-right font-semibold tabular-nums ${m.sequencer_net_USD_per_year >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtUSD(m.sequencer_net_USD_per_year, 2)}</div>
-            <div className="text-slate-500">Issuance-only APY</div><div className="text-right tabular-nums">{fmtNum(m.sequencer_issuance_APY_pct, 2)}%</div>
-            <div className="text-slate-500 font-medium">Net APY (pre‑infrastructure)</div><div className={`text-right font-semibold tabular-nums ${m.sequencer_APY_pct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtNum(m.sequencer_APY_pct, 2)}%</div>
-          </div>
-          <Notes title="Assumptions">
-            <div><b>Infrastructure costs excluded.</b> This card shows pre-infrastructure economics only: issuance + fees, minus on-chain L1 costs (propose gas, proof verification, blobs). Server hosting, monitoring, bandwidth, on-call, and operational staff must be subtracted separately. Factor those in outside the dashboard based on your own deployment.</div>
-            <div>Active sequencers ≈ total staked ÷ assumed stake per sequencer. Uniform proposer rotation (1/N slots each).</div>
-            <div>Sequencer-side only: earnings = (operator issuance × {fmtNum(gov.operatorIssuanceSeqSharePct,0)}% seq share) + fees on proposed slots. Prover rewards go to a separate set.</div>
-          </Notes>
         </CardContent></Card>
 
       </div>
 
       <div className="xl:col-span-7 space-y-6">
+        {/* ========== NETWORK OVERVIEW ========== */}
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Slot Diagram</CardTitle></CardHeader><CardContent className="space-y-3">
+          <BlockDiagram L={cong.manaTarget*2} T={cong.manaTarget} U={U} fee={feeB} burn={burnB} tips={tipsB} excess={m.excessMana} userPaysB={m.totalUserFeeUSD_tx*m.txPerBlock} right={{
+            burnB: m.burnUSD_tx*m.txPerBlock,
+            paidEthB: m.passThroughFeesToETH_tx*m.txPerBlock,
+            nonEthB: (proverComputeUSDPerTx + (m.proverSubsidyUSDPerBlock_FIXED/Math.max(1,m.txPerBlock))) * m.txPerBlock,
+            earnedProvB: Math.max(0,m.provNetUSD_tx)*m.txPerBlock,
+            earnedSeqB: Math.max(0,m.seqNetUSD_tx)*m.txPerBlock
+          }} />
+        </CardContent></Card>
+
         <div className="grid md:grid-cols-2 gap-6">
           <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>L2 Cost per L1 Slot – Sequencer</CardTitle></CardHeader><CardContent className="space-y-3">
             <div className="text-sm font-medium">Fixed</div>
@@ -1067,6 +1178,123 @@ export default function AztecFeeModel_V6(){
             <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500"><div>Inputs (Verify)</div><div className="text-right">{fmtNum(cost.proofVerifyGasPerEpoch,0)} gas × {cost.l1GasPriceGwei.toFixed(2)} gwei × ${fmtNum(cost.ethPrice,0)}</div></div>
           </CardContent></Card>
         </div>
+
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Blob usage as TPS rises</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2 text-sm">
+          <div className="text-slate-500">ETH Max / L2 Slot (ceiling)</div><div className="text-right">{fmtNum(m.ethBlobBudgetPerL2Block, 0)} ({fmtNum(net.maxBlobsPerEthBlock, 0)} / ETH block)</div>
+          <div className="text-slate-500">ETH Target / L2 Slot (sustainable)</div><div className="text-right">{fmtNum(m.ethBlobTargetPerL2Block, 0)} ({fmtNum(net.targetBlobsPerEthBlock, 0)} / ETH block)</div>
+          <div className="text-slate-500">Policy Blobs / L2 Slot</div><div className="text-right">{fmtNum(m.policyBlobCap, 0)}</div>
+          <div className="text-slate-500">Proposal Blobs (of available)</div><div className="text-right">{m.proposalBlobsPerBlock} / {fmtNum(m.ethBlobBudgetPerL2Block,0)}</div>
+          <div className="text-slate-500">Data Blobs (of available)</div><div className="text-right">{m.dataBlobsUsed} / {fmtNum(m.ethBlobBudgetPerL2Block,0)}</div>
+          <div className="text-slate-500">Total Blobs (of available)</div><div className="text-right font-medium">{m.blobsUsed} / {fmtNum(m.ethBlobBudgetPerL2Block,0)}</div>
+        </CardContent></Card>
+
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Governance & Issuance</CardTitle></CardHeader><CardContent className="space-y-4">
+          {(() => {
+            const circPct = gov.maxSupplyTokens>0 ? (m.circTokens / gov.maxSupplyTokens) * 100 : 0;
+            const stakedPctOfCirc = m.circTokens>0 ? (m.stakedTokens / m.circTokens) * 100 : 0;
+            const fdvUSD = gov.maxSupplyTokens * govForModel.tokenPriceUSD;
+            const perBlockIss = m.issuanceUSDPerBlock;
+            const perBlockSeq = m.issuanceToSequencersUSDPerBlock;
+            const perBlockProv = m.issuanceToProversUSDPerBlock;
+            const perBlockBurn = m.burnUSDPerBlock;
+            const perBlockNetInflation = m.netIssuanceAfterBurnUSDPerBlock;
+            const blocksPerYear = m.blocksPerDay * 365;
+            const stakedUSD = m.stakedTokens * govForModel.tokenPriceUSD;
+            const perBlockEarned = (Math.max(0,m.seqNetUSD_tx)+Math.max(0,m.provNetUSD_tx)) * m.txPerBlock;
+            const feesAPR = stakedUSD>0 ? ((perBlockEarned*blocksPerYear)/stakedUSD)*100 : 0;
+            const netInflPctAnnual = stakedUSD>0 ? ((perBlockNetInflation*blocksPerYear)/stakedUSD)*100 : 0;
+            const inflPctAnnual = stakedUSD>0 ? ((perBlockIss*blocksPerYear)/stakedUSD)*100 : 0;
+            const burnPctAnnual = stakedUSD>0 ? ((perBlockBurn*blocksPerYear)/stakedUSD)*100 : 0;
+            return (
+              <>
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div className="text-slate-500">Circulating Supply (tokens)</div><div className="text-right">{fmtNum(m.circTokens,0)} ({fmtNum(circPct,1)}% of Max)</div>
+                  <div className="text-slate-500">Staked Supply (tokens)</div><div className="text-right">{fmtNum(m.stakedTokens,0)} ({fmtNum(stakedPctOfCirc,1)}% of Circ)</div>
+                  <div className="text-slate-500">Token Price (Derived)</div><div className="text-right">{fmtUSD(govForModel.tokenPriceUSD,4)}</div>
+                  <div className="text-slate-500">Circ Market Cap</div><div className="text-right">{fmtUSDSig4(m.circTokens * govForModel.tokenPriceUSD)}</div>
+                  <div className="text-slate-500">FDV</div><div className="text-right">{fmtUSDSig4(fdvUSD)}</div>
+                </div>
+                <div className="space-y-1 text-sm">
+                  <div className="font-medium text-slate-700">Slot Reward (per published checkpoint)</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="text-slate-500">- Sequencers ({fmtNum(gov.operatorIssuanceSeqSharePct,1)}%)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(perBlockSeq), 2)} AZTEC <span className="text-slate-400">({fmtUSD(perBlockSeq,4)})</span></div>
+                    <div className="text-slate-500">- Provers ({fmtNum(gov.operatorIssuanceProvSharePct,1)}%)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(perBlockProv), 2)} AZTEC <span className="text-slate-400">({fmtUSD(perBlockProv,4)})</span></div>
+                    {m.issuanceToOtherUSDPerBlock > 0 && (
+                      <>
+                        <div className="text-slate-500">- Retained/Other ({fmtNum(Math.max(0, 100 - gov.operatorIssuanceSeqSharePct - gov.operatorIssuanceProvSharePct),1)}%)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(m.issuanceToOtherUSDPerBlock), 2)} AZTEC <span className="text-slate-400">({fmtUSD(m.issuanceToOtherUSDPerBlock,4)})</span></div>
+                      </>
+                    )}
+                    <div className="text-slate-500">- Burnt (congestion)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(perBlockBurn), 2)} AZTEC <span className="text-slate-400">({fmtUSD(perBlockBurn,4)})</span></div>
+                  </div>
+                </div>
+                <div className="space-y-1 text-sm">
+                  <div className="font-medium text-slate-700">Staker APY</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="text-slate-500">- Fee APR</div><div className="text-right">{fmtNum(feesAPR,2)}%</div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="text-slate-500">- Net Inflation (Inflation − Burn)</div>
+                    <div className="text-right">{fmtNum(netInflPctAnnual,2)}% ({fmtNum(inflPctAnnual,2)}% − {fmtNum(burnPctAnnual,2)}%)</div>
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+
+          {stage === "Ignition" && (
+            <Notes title="Coverage & Pure Inflation">
+              <div>Coverage ratio (operators): issuance_to_operators / (paid_to_eth + non_eth_subsidy)</div>
+              <div className="font-medium">{fmtUSD(m.issuanceToOperatorsUSDPerBlock,4)} / {fmtUSD((m.seqExecUSDPerBlock_GAS_FIXED + m.proposalBlobUSDPerBlock_FIXED + m.seqBlobUSDPerBlock_VARIABLE + m.proverOnchainUSDPerBlock_FIXED) + m.proverSubsidyUSDPerBlock_FIXED,4)}</div>
+            </Notes>
+          )}
+        </CardContent></Card>
+
+        {/* ========== INFRA-OPERATOR SCENARIOS ========== */}
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Per-Sequencer Economics</CardTitle></CardHeader><CardContent className="space-y-3">
+          <NumberSlider label="Assumed Stake per Sequencer (AZTEC)" min={1_000} max={2_000_000} step={1} value={seq.stakePerSequencer} onChange={(v)=> setSeq({ ...seq, stakePerSequencer: v })} />
+          <div className="grid grid-cols-2 gap-2 text-xs text-slate-500">
+            <div>Target Committee Size</div><div className="text-right tabular-nums">{seq.targetCommitteeSize}</div>
+            <div>Min Stake (Ejection Floor)</div><div className="text-right tabular-nums">{fmtNum(seq.minSequencerStake, 0)} AZTEC</div>
+            <div>Proof Submission Window</div><div className="text-right tabular-nums">{seq.proofSubmissionEpochs} epoch</div>
+          </div>
+          <div className="pt-2 border-t" />
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div className="text-slate-500">Approx Active Sequencers</div><div className="text-right font-medium tabular-nums">{fmtNum(m.numActiveSequencers, 0)}</div>
+            <div className="text-slate-500">Slots Proposed / Sequencer / Year</div><div className="text-right tabular-nums">{fmtNum(m.slotsPerSequencerPerYear, 1)}</div>
+            <div className="text-slate-500">Stake Value</div><div className="text-right tabular-nums">{fmtNum(seq.stakePerSequencer, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_stake_USD, 2)})</span></div>
+          </div>
+          <div className="pt-2 border-t" />
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-emerald-700">Annual Earnings</div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-slate-500">Slot Rewards (issuance)</div>
+                <div className="text-right tabular-nums">{fmtNum(m.sequencer_issuance_AZTEC_per_year, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_issuance_USD_per_year, 2)})</span></div>
+                <div className="text-slate-500">Tx Fees</div><div className="text-right tabular-nums">{fmtNum(m.sequencer_fee_earnings_AZTEC_per_year, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_fee_earnings_USD_per_year, 2)})</span></div>
+                <div className="text-slate-500 font-medium">Total</div><div className="text-right font-medium tabular-nums">{fmtNum(m.sequencer_total_earnings_AZTEC_per_year, 0)} AZTEC <span className="text-slate-400">({fmtUSD(m.sequencer_total_earnings_USD_per_year, 2)})</span></div>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-rose-700">Annual Protocol Costs</div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-slate-500">L1 Gas + Blobs</div>
+                <div className="text-right tabular-nums">{fmtNum(m.sequencer_L1_costs_ETH_per_year, 4)} ETH <span className="text-slate-400">({fmtUSD(m.sequencer_L1_costs_USD_per_year, 2)})</span></div>
+                <div className="text-slate-500 font-medium">Total Costs</div><div className="text-right font-medium tabular-nums">{fmtUSD(m.sequencer_total_costs_USD_per_year, 2)}</div>
+              </div>
+            </div>
+          </div>
+          <div className="pt-2 border-t" />
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div className="text-slate-500">Net USD / Year</div><div className={`text-right font-semibold tabular-nums ${m.sequencer_net_USD_per_year >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtUSD(m.sequencer_net_USD_per_year, 2)}</div>
+            <div className="text-slate-500">Issuance-only APY</div><div className="text-right tabular-nums">{fmtNum(m.sequencer_issuance_APY_pct, 2)}%</div>
+            <div className="text-slate-500 font-medium">Net APY (pre‑infrastructure)</div><div className={`text-right font-semibold tabular-nums ${m.sequencer_APY_pct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtNum(m.sequencer_APY_pct, 2)}%</div>
+          </div>
+          <Notes title="Assumptions">
+            <div><b>Infrastructure costs excluded.</b> This card shows pre-infrastructure economics only: issuance + fees, minus on-chain L1 costs (propose gas, proof verification, blobs). Server hosting, monitoring, bandwidth, on-call, and operational staff must be subtracted separately.</div>
+            <div>Active sequencers ≈ total staked ÷ assumed stake per sequencer. Uniform proposer rotation (1/N slots each).</div>
+            <div>Sequencer-side only: earnings = (operator issuance × {fmtNum(gov.operatorIssuanceSeqSharePct,0)}% seq share) + fees on proposed slots. Prover rewards go to a separate set.</div>
+          </Notes>
+        </CardContent></Card>
 
         <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Per-Prover Economics</CardTitle></CardHeader><CardContent className="space-y-3">
           <div className="grid md:grid-cols-2 gap-3">
@@ -1107,93 +1335,61 @@ export default function AztecFeeModel_V6(){
             <div className="text-slate-500">Gross Margin</div><div className={`text-right tabular-nums ${thisProverMarginPct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtNum(thisProverMarginPct, 1)}%</div>
           </div>
           <Notes title="Model">
-            <div><b>Infrastructure costs excluded.</b> Real ZK-compute costs (GPU rigs, electricity, cooling, ops) are NOT subtracted here. The protocol does bake an oracle-priced compute subsidy ({fmtUSD(cost.proverComputeUSDPerTx, 6)}/tx) into the fee revenue above, so provers are partly compensated; subtract your own actual hardware cost outside the dashboard to get your real margin.</div>
+            <div><b>Infrastructure costs excluded.</b> Real ZK-compute costs (GPU rigs, electricity, cooling, ops) are NOT subtracted here. The protocol does bake an oracle-priced compute subsidy ({fmtUSD(proverComputeUSDPerTx, 6)}/tx) into the fee revenue above, so provers are partly compensated; subtract your own actual hardware cost outside the dashboard to get your real margin.</div>
             <div><b>Reward split.</b> In each epoch, on-time provers split the pool by weight(c) = c<sup>α</sup>. Per-epoch split = w(self) / (w(self) + (N−1) × w(others)). Higher α concentrates rewards toward the most consistent provers.</div>
             <div><b>Annual effective share = per-epoch split × your consistency.</b> Doubling equally-consistent provers halves per-prover earnings cleanly; with differing consistency, the more consistent prover earns a premium.</div>
             <div><b>L1 verify.</b> Submission assumed awarded proportionally to effective share — this prover pays {fmtNum(proverEffectiveSharePct, 1)}% of annual on-chain verify gas.</div>
           </Notes>
         </CardContent></Card>
 
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Blob usage as TPS rises</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2 text-sm">
-          <div className="text-slate-500">ETH Max / L2 Slot (ceiling)</div><div className="text-right">{fmtNum(m.ethBlobBudgetPerL2Block, 0)} ({fmtNum(net.maxBlobsPerEthBlock, 0)} / ETH block)</div>
-          <div className="text-slate-500">ETH Target / L2 Slot (sustainable)</div><div className="text-right">{fmtNum(m.ethBlobTargetPerL2Block, 0)} ({fmtNum(net.targetBlobsPerEthBlock, 0)} / ETH block)</div>
-          <div className="text-slate-500">Policy Blobs / L2 Slot</div><div className="text-right">{fmtNum(m.policyBlobCap, 0)}</div>
-          <div className="text-slate-500">Proposal Blobs (of available)</div><div className="text-right">{m.proposalBlobsPerBlock} / {fmtNum(m.ethBlobBudgetPerL2Block,0)}</div>
-          <div className="text-slate-500">Data Blobs (of available)</div><div className="text-right">{m.dataBlobsUsed} / {fmtNum(m.ethBlobBudgetPerL2Block,0)}</div>
-          <div className="text-slate-500">Total Blobs (of available)</div><div className="text-right font-medium">{m.blobsUsed} / {fmtNum(m.ethBlobBudgetPerL2Block,0)}</div>
-        </CardContent></Card>
-
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Governance & Issuance</CardTitle></CardHeader><CardContent className="space-y-4">
-          {(() => {
-            const circPct = gov.maxSupplyTokens>0 ? (m.circTokens / gov.maxSupplyTokens) * 100 : 0;
-            const stakedPctOfCirc = m.circTokens>0 ? (m.stakedTokens / m.circTokens) * 100 : 0;
-            const fdvUSD = gov.maxSupplyTokens * govForModel.tokenPriceUSD;
-            const perBlockIss = m.issuanceUSDPerBlock;
-            const perBlockSeq = m.issuanceToSequencersUSDPerBlock;
-            const perBlockProv = m.issuanceToProversUSDPerBlock;
-            const perBlockBurn = m.burnUSDPerBlock;
-            const perBlockNetInflation = m.netIssuanceAfterBurnUSDPerBlock;
-            const blocksPerYear = m.blocksPerDay * 365;
-            const stakedUSD = m.stakedTokens * govForModel.tokenPriceUSD;
-            const circUSD = m.circTokens * govForModel.tokenPriceUSD;
-            const perBlockEarned = (Math.max(0,m.seqNetUSD_tx)+Math.max(0,m.provNetUSD_tx)) * m.txPerBlock;
-            const feesAPR = stakedUSD>0 ? ((perBlockEarned*blocksPerYear)/stakedUSD)*100 : 0;
-            const inflAPY = m._stakerAPYPct; // issuance-only APY basis
-            const netInflPctAnnual = stakedUSD>0 ? ((perBlockNetInflation*blocksPerYear)/stakedUSD)*100 : 0;
-            const inflPctAnnual = stakedUSD>0 ? ((perBlockIss*blocksPerYear)/stakedUSD)*100 : 0;
-            const burnPctAnnual = stakedUSD>0 ? ((perBlockBurn*blocksPerYear)/stakedUSD)*100 : 0;
-            return (
-              <>
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div className="text-slate-500">Circulating Supply (tokens)</div><div className="text-right">{fmtNum(m.circTokens,0)} ({fmtNum(circPct,1)}% of Max)</div>
-                  <div className="text-slate-500">Staked Supply (tokens)</div><div className="text-right">{fmtNum(m.stakedTokens,0)} ({fmtNum(stakedPctOfCirc,1)}% of Circ)</div>
-                  <div className="text-slate-500">Token Price (Derived)</div><div className="text-right">{fmtUSD(govForModel.tokenPriceUSD,4)}</div>
-                  <div className="text-slate-500">Circ Market Cap</div><div className="text-right">{fmtUSDSig4(m.circTokens * govForModel.tokenPriceUSD)}</div>
-                  <div className="text-slate-500">FDV</div><div className="text-right">{fmtUSDSig4(fdvUSD)}</div>
-                </div>
-                <div className="space-y-1 text-sm">
-                  <div className="font-medium text-slate-700">Slot Reward (per published checkpoint)</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="text-slate-500">- Sequencers ({fmtNum(gov.operatorIssuanceSeqSharePct,1)}%)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(perBlockSeq), 2)} AZTEC <span className="text-slate-400">({fmtUSD(perBlockSeq,4)})</span></div>
-                    <div className="text-slate-500">- Provers ({fmtNum(gov.operatorIssuanceProvSharePct,1)}%)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(perBlockProv), 2)} AZTEC <span className="text-slate-400">({fmtUSD(perBlockProv,4)})</span></div>
-                    {m.issuanceToOtherUSDPerBlock > 0 && (
-                      <>
-                        <div className="text-slate-500">- Retained/Other ({fmtNum(Math.max(0, 100 - gov.operatorIssuanceSeqSharePct - gov.operatorIssuanceProvSharePct),1)}%)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(m.issuanceToOtherUSDPerBlock), 2)} AZTEC <span className="text-slate-400">({fmtUSD(m.issuanceToOtherUSDPerBlock,4)})</span></div>
-                      </>
-                    )}
-                    <div className="text-slate-500">- Burnt (congestion)</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(perBlockBurn), 2)} AZTEC <span className="text-slate-400">({fmtUSD(perBlockBurn,4)})</span></div>
-                  </div>
-                </div>
-                <div className="space-y-1 text-sm">
-                  <div className="font-medium text-slate-700">Staker APY</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="text-slate-500">- Fee APR</div><div className="text-right">{fmtNum(feesAPR,2)}%</div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="text-slate-500">- Net Inflation (Inflation − Burn)</div>
-                    <div className="text-right">{fmtNum(netInflPctAnnual,2)}% ({fmtNum(inflPctAnnual,2)}% − {fmtNum(burnPctAnnual,2)}%)</div>
-                  </div>
-                </div>
-              </>
-            );
-          })()}
-          
-          {stage === "Ignition" && (
-            <Notes title="Coverage & Pure Inflation">
-              <div>Coverage ratio (operators): issuance_to_operators / (paid_to_eth + non_eth_subsidy)</div>
-              <div className="font-medium">{fmtUSD(m.issuanceToOperatorsUSDPerBlock,4)} / {fmtUSD((m.seqExecUSDPerBlock_GAS_FIXED + m.proposalBlobUSDPerBlock_FIXED + m.seqBlobUSDPerBlock_VARIABLE + m.proverOnchainUSDPerBlock_FIXED) + m.proverSubsidyUSDPerBlock_FIXED,4)}</div>
-            </Notes>
-          )}
-        </CardContent></Card>
-
-        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Slot Diagram</CardTitle></CardHeader><CardContent className="space-y-3">
-          <BlockDiagram L={cong.manaTarget*2} T={cong.manaTarget} U={U} fee={feeB} burn={burnB} tips={tipsB} excess={m.excessMana} userPaysB={m.totalUserFeeUSD_tx*m.txPerBlock} right={{
-            burnB: m.burnUSD_tx*m.txPerBlock,
-            paidEthB: m.passThroughFeesToETH_tx*m.txPerBlock,
-            nonEthB: (cost.proverComputeUSDPerTx + (m.proverSubsidyUSDPerBlock_FIXED/Math.max(1,m.txPerBlock))) * m.txPerBlock,
-            earnedProvB: Math.max(0,m.provNetUSD_tx)*m.txPerBlock,
-            earnedSeqB: Math.max(0,m.seqNetUSD_tx)*m.txPerBlock
-          }} />
+        <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Operator Economics (What‑if)</CardTitle></CardHeader><CardContent className="space-y-3">
+          <div className="grid md:grid-cols-3 gap-3">
+            <NumberSlider label="Total Stake Operated (AZTEC)" min={10_000} max={500_000_000} step={1} value={opTotalStakeAZTEC} onChange={setOpTotalStakeAZTEC} />
+            <PercentSlider label="Own Stake (% of operated)" value={opOwnStakePct} onChange={setOpOwnStakePct} />
+            <PercentSlider label="Commission on Delegator Rewards (%)" value={opCommissionPct} onChange={setOpCommissionPct} />
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs text-slate-500 pt-2 border-t">
+            <div>Sequencers Operated</div><div className="text-right font-medium tabular-nums text-slate-700">{fmtNum(opNumSequencers, 2)}</div>
+            <div>Network Stake Share</div><div className="text-right tabular-nums">{fmtNum(opNetworkStakeSharePct, 2)}%</div>
+            <div>Own Stake</div><div className="text-right tabular-nums">{fmtNum(opOwnStakeAZTEC, 0)} AZTEC ({fmtUSD(opOwnStakeUSD, 2)})</div>
+            <div>Delegated Stake</div><div className="text-right tabular-nums">{fmtNum(opDelegatedStakeAZTEC, 0)} AZTEC ({fmtUSD(delegatorStakeUSD, 2)})</div>
+          </div>
+          <div className="pt-2 border-t" />
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-emerald-700">Annual Gross Rewards (fleet)</div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-slate-500">Issuance</div><div className="text-right tabular-nums">{fmtNum(opGrossIssuanceAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossIssuanceUSDPerYear, 2)})</span></div>
+                <div className="text-slate-500">Tx Fees</div><div className="text-right tabular-nums">{fmtNum(opGrossFeesAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossFeesUSDPerYear, 2)})</span></div>
+                <div className="text-slate-500 font-medium">Total Gross</div><div className="text-right font-medium tabular-nums">{fmtNum(opGrossTotalAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossTotalUSDPerYear, 2)})</span></div>
+              </div>
+              <div className="text-sm font-medium pt-1">Income Split</div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-slate-500">From Own Stake (100%)</div><div className="text-right tabular-nums">{fmtNum(opFromOwnStakeAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opFromOwnStakeUSDPerYear, 2)})</span></div>
+                <div className="text-slate-500">Commission Income</div><div className="text-right tabular-nums">{fmtNum(opCommissionIncomeAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opCommissionIncomeUSDPerYear, 2)})</span></div>
+                <div className="text-slate-500 font-medium">Operator Gross Income</div><div className="text-right font-medium tabular-nums">{fmtNum(opGrossIncomeAZTECPerYear, 0)} AZTEC <span className="text-slate-400">({fmtUSD(opGrossIncomeUSDPerYear, 2)})</span></div>
+                <div className="text-slate-500 text-[11px]">(Delegators keep)</div><div className="text-right text-[11px] text-slate-400 tabular-nums">{fmtNum(delegatorNetRewardsAZTECPerYear, 0)} AZTEC ({fmtUSD(delegatorNetRewardsUSDPerYear, 2)})</div>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-rose-700">Annual Protocol Costs</div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-slate-500">L1 Gas + Blobs</div><div className="text-right tabular-nums">{fmtNum(opL1CostsETHPerYear, 4)} ETH <span className="text-slate-400">({fmtUSD(opL1CostsUSDPerYear, 2)})</span></div>
+                <div className="text-slate-500 font-medium">Total Costs</div><div className="text-right font-medium tabular-nums">{fmtUSD(opTotalCostsUSDPerYear, 2)}</div>
+              </div>
+              <div className="text-sm font-medium pt-1">Bottom Line</div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-slate-500 font-medium">Pre‑Infra EBITDA / Year</div><div className={`text-right font-semibold tabular-nums ${opNetEBITDAUSDPerYear >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtUSD(opNetEBITDAUSDPerYear, 2)}</div>
+                <div className="text-slate-500">APY on Own Stake (pre‑infra)</div><div className={`text-right font-semibold tabular-nums ${opAPYOnOwnStakePct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{fmtNum(opAPYOnOwnStakePct, 2)}%</div>
+                <div className="text-slate-500">Delegator APY (net of comm.)</div><div className="text-right tabular-nums">{fmtNum(delegatorAPYPct, 2)}%</div>
+              </div>
+            </div>
+          </div>
+          <Notes title="Model">
+            <div><b>Infrastructure costs excluded.</b> Only on-chain L1 costs (gas + blobs) are shown. Real-world hosting, monitoring, bandwidth, and ops staff cost must be subtracted separately based on your fleet size.</div>
+            <div>Operator runs <code>{fmtNum(opNumSequencers, 1)}</code> sequencers (total stake / stake per sequencer). Rewards per sequencer come from the Per-Sequencer Economics card.</div>
+            <div>Commission applies only to delegator-stake rewards. Operator keeps 100% of rewards from own stake + commission % of delegator rewards, pays all L1 costs.</div>
+          </Notes>
         </CardContent></Card>
 
         <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Business Case – Annual Income Statement (Sequencer & Prover)</CardTitle></CardHeader><CardContent className="grid md:grid-cols-2 gap-6 text-sm">
@@ -1216,7 +1412,7 @@ export default function AztecFeeModel_V6(){
             // Prover per year
             const provRevenueY = m.provRevenueUSD_tx * txPerYear;
             const provFixedY = m.l1USDPerTx_Verify * txPerYear;
-            const provVariableY = cost.proverComputeUSDPerTx * txPerYear;
+            const provVariableY = proverComputeUSDPerTx * txPerYear;
             const provMarginY = m.provNetUSD_tx * txPerYear;
             const provMarginPct = provRevenueY > 0 ? (provMarginY / provRevenueY) * 100 : 0;
             const provIssuanceY = m.issuanceToProversUSDPerBlock * blocksPerYear;

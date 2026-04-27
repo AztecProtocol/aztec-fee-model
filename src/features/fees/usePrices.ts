@@ -1,12 +1,29 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 
+export interface ProtocolState {
+  manaTarget: number | null;
+  manaLimit: number | null;
+  provingCostPerManaWei: number | null;
+  checkpointRewardAZTEC: number | null;
+  sequencerBps: number | null;
+  slotDurationSec: number | null;
+  epochDurationSlots: number | null;
+  proofSubmissionEpochs: number | null;
+  ethPerFeeAssetE12: number | null;
+  l1BaseFeeWei: number | null;
+  l1BlobFeeWei: number | null;
+  manaMinFeeWeiETH: number | null;
+  manaMinFeeWeiFeeAsset: number | null;
+}
+
 export interface PriceData {
   timestamp: string;
   ethPriceUSD: number | null;
   aztecPriceUSD: number | null;
   gasPriceGwei: { current: number | null; avg30d: number | null };
   blobGasPriceGwei: number | null;
+  protocolState?: ProtocolState;
   notes: string[];
   errors: string[];
 }
@@ -16,7 +33,7 @@ interface Cached {
   cachedAt: number;
 }
 
-const CACHE_KEY = "aztecDashboard.prices.v1";
+const CACHE_KEY = "aztecDashboard.prices.v2";
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 function readCache(): Cached | null {
