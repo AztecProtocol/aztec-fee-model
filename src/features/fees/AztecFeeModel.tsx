@@ -20,6 +20,23 @@ const fmtUSD = (n: number, d = 2) => {
 const fmtUSDSig4 = (n: number) => (isFinite(n) ? n.toLocaleString(undefined, { maximumSignificantDigits: 8 }) : "–");
 const fmtNum = (n: number, d = 0) => (isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: d }) : "–");
 
+// EIP-4844-style fake exponential: ~e^(numerator/denominator). This is exactly the curve the
+// Aztec FeeLib uses for the congestion multiplier (FeeLib.fakeExponential / congestionMultiplier),
+// rather than a true Math.exp, so the dashboard matches on-chain rounding behavior.
+function fakeExponential(numerator: number, denominator: number): number {
+  if (denominator <= 0) return 1;
+  let i = 1;
+  let output = 0;
+  let numeratorAccum = denominator; // factor = 1 × denominator
+  // Terminates once the accumulating term underflows; cap iterations as a safety backstop.
+  while (numeratorAccum > 0 && i < 1000) {
+    output += numeratorAccum;
+    numeratorAccum = (numeratorAccum * numerator) / (denominator * i);
+    i += 1;
+  }
+  return output / denominator;
+}
+
 // Terminology (post-Alpha):
 //   Slot       = L1 publishing unit; one checkpoint published per slot. (72s in Alpha)
 //   Checkpoint = the slot's payload published to L1.
@@ -29,7 +46,7 @@ const fmtNum = (n: number, d = 0) => (isFinite(n) ? n.toLocaleString(undefined, 
 // slots-per-epoch (historical naming); user-facing labels use Slot terminology.
 interface NetworkParams { tps: number; blockTime: number; blocksPerEpoch: number; blocksPerSlot: number; maxTxPerCheckpoint: number; manaPerTx: number; bytesPerTxDA: number; bytesPerBlob: number; maxBlobsPerEthBlock: number; targetBlobsPerEthBlock: number; }
 interface CostParams { ethPrice: number; l1GasPriceGwei: number; l1ExecGasPerBlock: number; blobGasPriceGwei: number; proofVerifyGasPerEpoch: number; provingCostPerManaWei: number; }
-interface CongestionParams { minMultiplier: number; manaTarget: number; manaLimit: number; tipPctOfBase: number; proverShareOfUnburnedBase: number; blobsPerBlockPolicy: number; }
+interface CongestionParams { minMultiplier: number; manaTarget: number; manaLimit: number; excessManaMultiple: number; blobsPerBlockPolicy: number; }
 interface GovParams { maxSupplyTokens: number; circulatingPct: number; stakeRatePct: number; checkpointRewardAZTEC: number; issuanceRateOnMaxPct: number; tokenPriceUSD: number; operatorIssuanceSeqSharePct: number; operatorIssuanceProvSharePct: number; }
 interface SequencerParams { targetCommitteeSize: number; minSequencerStake: number; stakePerSequencer: number; proofSubmissionEpochs: number; }
 
@@ -47,7 +64,10 @@ const DEFAULT: { net: NetworkParams; cost: CostParams; cong: CongestionParams; g
   // manaTarget: 75M, manaLimit: 150M (verified live via cast getManaTarget()/getManaLimit()
   // on Rollup at 0xae20...4962, 2026-04-27).
   // blobsPerBlockPolicy: 3 (FeeLib.sol:72 BLOBS_PER_CHECKPOINT). User-billed DA constant.
-  cong: { minMultiplier: 1.0, manaTarget: 75_000_000, manaLimit: 150_000_000, tipPctOfBase: 0, proverShareOfUnburnedBase: 0.3, blobsPerBlockPolicy: 3 },
+  // excessManaMultiple: accumulated excess mana as a multiple of manaTarget (EIP-1559-style
+  // running accumulator; 0 = at/below target, the normal Alpha state). No tips/proverShare:
+  // v4 has no tip field, and the seq/prover fee split is cost-based (not a flat %).
+  cong: { minMultiplier: 1.0, manaTarget: 75_000_000, manaLimit: 150_000_000, excessManaMultiple: 0, blobsPerBlockPolicy: 3 },
   // checkpointRewardAZTEC: 500 AZTEC/slot (Rollup.getCheckpointReward()). issuanceRateOnMaxPct
   // is now DERIVED from this × slotsPerYear / maxSupplyTokens (kept in interface for downstream
   // compatibility; the auto-derive logic in the component overrides any manual value).
@@ -147,24 +167,40 @@ function useModel(net: NetworkParams, cost: CostParams, cong: CongestionParams, 
     const baseComponentPerManaUSD_BILLED = seqCostPerManaUSD_BILLED + proverVerifyPerManaUSD + proverComputePerManaUSD_BILLED;
 
     const blockManaUsed = txPerBlock * net.manaPerTx;
-    const excessMana = Math.max(0, blockManaUsed - cong.manaTarget);
-    const feeUpdateFraction = cong.manaTarget / 0.117;
-    const congestionMultiplier = cong.minMultiplier * Math.exp(excessMana / Math.max(1e-9, feeUpdateFraction));
+    // Congestion multiplier (matches FeeLib.computeExcessMana + congestionMultiplier on v4):
+    //   excessMana is an ACCUMULATED running value (excess_n = max(0, excess_{n-1}+used−target)),
+    //   not a fresh per-block figure. It is path-dependent, so we expose it as an input
+    //   (excessManaMultiple × manaTarget). The multiplier uses the EIP-4844 fakeExponential with
+    //   denominator = manaTarget × 854700854/1e8 (~8.547× target), matching MAGIC_* constants.
+    const excessMana = Math.max(0, cong.excessManaMultiple) * cong.manaTarget;
+    const congestionUpdateFraction = cong.manaTarget * (854_700_854 / 1e8);
+    const instantaneousBlockExcess = Math.max(0, blockManaUsed - cong.manaTarget); // info: per-slot add to the accumulator
+    // fakeExponential(num, denom) ≈ e^(num/denom). The contract scales by MINIMUM_CONGESTION_MULTIPLIER
+    // (1e9) as fixed-point precision and divides it back out, so in floating point factor=1 is exact;
+    // minMultiplier (default 1.0) is the floor. Cap the exponent at denom×100 exactly as the contract
+    // does (FeeLib.congestionMultiplier) to avoid runaway/Infinity at extreme excess mana.
+    const cappedExcessMana = Math.min(excessMana, congestionUpdateFraction * 100);
+    const congestionMultiplier = cong.minMultiplier * fakeExponential(cappedExcessMana, Math.max(1e-9, congestionUpdateFraction));
 
     const baseFeePerManaUSD = baseComponentPerManaUSD_BILLED * congestionMultiplier;
     const baseFeePerManaETH = baseFeePerManaUSD / Math.max(1e-9, cost.ethPrice);
     const baseFeePerManaGwei = baseFeePerManaETH / 1e-9;
     const manaPerGwei = baseFeePerManaGwei > 0 ? 1 / baseFeePerManaGwei : 0;
 
-    const tipPerManaUSD = baseFeePerManaUSD * (cong.tipPctOfBase / 100);
+    // No tips in v4 (FeeHeader has no tip field). Burn = the congestion premium above base cost.
     const burnPerManaUSD = Math.max(0, baseComponentPerManaUSD_BILLED * (congestionMultiplier - 1));
 
-    const unburnedPerManaUSD = baseComponentPerManaUSD_BILLED;
-    const toProverPerManaUSD = unburnedPerManaUSD * cong.proverShareOfUnburnedBase;
+    // Sequencer vs prover fee split is COST-BASED on v4 (RewardLib.sol):
+    //   proverFee = min(manaUsed × proverCost, fee − burn);  sequencerFee = fee − burn − proverFee.
+    // i.e. the prover recovers its cost component (verify + compute), the sequencer takes the rest.
+    // At the minimum base fee this means fees just reimburse costs — operator profit is from issuance.
+    const unburnedPerManaUSD = baseComponentPerManaUSD_BILLED; // = fee − burn, per mana
+    const proverCostPerManaUSD = proverVerifyPerManaUSD + proverComputePerManaUSD_BILLED;
+    const toProverPerManaUSD = Math.min(proverCostPerManaUSD, unburnedPerManaUSD);
     const toSequencerPerManaUSD = unburnedPerManaUSD - toProverPerManaUSD;
 
     const feeBaseUSD_tx = baseFeePerManaUSD * net.manaPerTx;
-    const feeTipUSD_tx = tipPerManaUSD * net.manaPerTx;
+    const feeTipUSD_tx = 0; // tips removed (no v4 equivalent)
     const burnUSD_tx = burnPerManaUSD * net.manaPerTx;
 
     const l1USDPerTx_DA = seqBlobUSDPerBlock_VARIABLE / Math.max(1, txPerBlock);
@@ -260,14 +296,14 @@ function useModel(net: NetworkParams, cost: CostParams, cong: CongestionParams, 
       proverOnchainUSDPerBlock_FIXED, proverSubsidyUSDPerBlock_FIXED,
       seqCostPerManaUSD: seqCostPerManaUSD_ACTUAL, seqCostPerManaUSD_BILLED, proverVerifyPerManaUSD, proverComputePerManaUSD: proverComputePerManaUSD_ACTUAL, proverComputePerManaUSD_BILLED,
       baseComponentPerManaUSD: baseComponentPerManaUSD_ACTUAL, baseComponentPerManaUSD_BILLED,
-      congestionMultiplier, baseFeePerManaUSD, baseFeePerManaGwei, manaPerGwei, tipPerManaUSD, burnPerManaUSD,
+      congestionMultiplier, congestionUpdateFraction, excessMana, instantaneousBlockExcess, baseFeePerManaUSD, baseFeePerManaGwei, manaPerGwei, tipPerManaUSD: 0, burnPerManaUSD,
       feeBaseUSD_tx, feeTipUSD_tx, burnUSD_tx, l1USDPerTx_DA, l1USDPerTx_Verify, l1USDPerTx_Total,
       sequencerETHCostPerTx, proverETHCostPerTx,
       seqRevenueUSD_tx, provRevenueUSD_tx, seqFixedUSDPerTx,
       seqNetUSD_tx, provNetUSD_tx, totalUserFeeUSD_tx,
       passThroughFeesToETH_tx,
       coveredByBurnPct,
-      excessMana: Math.max(0, blockManaUsed - cong.manaTarget), blockManaUsed,
+      blockManaUsed,
       maxTxPerBlock_byBlob, tpsLimitByMana, tpsLimitByBlobs,
       issuanceTokensPerYear, issuanceTokensPerBlock, issuanceUSDPerBlock, issuanceToOperatorsUSDPerBlock, issuanceToStakersUSDPerBlock, issuanceToSequencersUSDPerBlock, issuanceToProversUSDPerBlock, issuanceToOtherUSDPerBlock, burnUSDPerBlock, netIssuanceAfterBurnUSDPerBlock,
       circTokens, stakedTokens, _stakerAPYPct, pureInflationUSDPerBlock, stakerRealAPYPct,
@@ -347,7 +383,7 @@ function ColorKey({items}:{items:{c:string;t:string;v?:number;pct?:string;stroke
   )
 }
 
-function BlockDiagram({L,T,U,fee,burn,tips,excess,userPaysB,right:{burnB,paidEthB,nonEthB,earnedProvB,earnedSeqB}}:{L:number;T:number;U:number;fee:number;burn:number;tips:number;excess:number;userPaysB:number;right:{burnB:number;paidEthB:number;nonEthB:number;earnedProvB:number;earnedSeqB:number;}}){
+function BlockDiagram({L,T,U,fee,burn,excess,userPaysB,right:{burnB,paidEthB,nonEthB,earnedProvB,earnedSeqB}}:{L:number;T:number;U:number;fee:number;burn:number;excess:number;userPaysB:number;right:{burnB:number;paidEthB:number;nonEthB:number;earnedProvB:number;earnedSeqB:number;}}){
   // Dimensions and layout
   const W=520, H=220, pad=12; const yBot=H-pad; const innerH=H-2*pad;
   const leftX=10, leftW=140; const rightW=140; const gutter=40; const xRight=leftX+leftW+gutter;
@@ -356,7 +392,7 @@ function BlockDiagram({L,T,U,fee,burn,tips,excess,userPaysB,right:{burnB,paidEth
   const usedH=h(U); const targetY=yBot-h(T);
 
   // RHS segments sized by % of User Pays
-  const seqMinusTips = Math.max(0, earnedSeqB - tips);
+  const seqEarn = Math.max(0, earnedSeqB);
   const userPays = Math.max(0, userPaysB);
   const containerH = usedH>0 ? usedH : innerH;
 
@@ -365,8 +401,7 @@ function BlockDiagram({L,T,U,fee,burn,tips,excess,userPaysB,right:{burnB,paidEth
     { key: 'eth', label: 'Burned ETH', val: paidEthB, fill: '#2BFAE9' },
     { key: 'noneth', label: 'Non‑ETH Costs', val: nonEthB, fill: '#918B7F' },
     { key: 'prov', label: 'Prover Earnings', val: earnedProvB, fill: '#FF2DF4' },
-    { key: 'seq', label: 'Sequencer Earnings (− tips)', val: seqMinusTips, fill: '#D4FF28' },
-    { key: 'tips', label: 'Tips', val: tips, fill: '#16A34A' },
+    { key: 'seq', label: 'Sequencer Earnings', val: seqEarn, fill: '#D4FF28' },
   ];
   const totalStack = segs.reduce((sum, s) => sum + Math.max(0, s.val), 0);
   const denom = userPays > 0 ? userPays : Math.max(1e-9, totalStack);
@@ -379,8 +414,7 @@ function BlockDiagram({L,T,U,fee,burn,tips,excess,userPaysB,right:{burnB,paidEth
     { c: 'bg-[#2BFAE9]/70', t: 'Burned ETH', v: paidEthB, pct: pct(paidEthB) },
     { c: 'bg-[#918B7F]', t: 'Non‑ETH Costs', v: nonEthB, pct: pct(nonEthB) },
     { c: 'bg-[#FF2DF4]/80', t: 'Prover Earnings', v: earnedProvB, pct: pct(earnedProvB) },
-    { c: 'bg-[#D4FF28]/80', t: 'Sequencer Earnings (− tips)', v: seqMinusTips, pct: pct(seqMinusTips) },
-    { c: 'bg-[#16A34A]/80', t: 'Tips', v: tips, pct: pct(tips) },
+    { c: 'bg-[#D4FF28]/80', t: 'Sequencer Earnings', v: seqEarn, pct: pct(seqEarn) },
   ];
 
   return (
@@ -442,7 +476,6 @@ export default function AztecFeeModel_V6(){
   const [numProvers, setNumProvers] = useState<number>(5);
   const [thisProverConsistencyPct, setThisProverConsistencyPct] = useState<number>(95);
   const [otherProversConsistencyPct, setOtherProversConsistencyPct] = useState<number>(90);
-  const [consistencyCurveAlpha, setConsistencyCurveAlpha] = useState<number>(2);
   const [oraclePremiumPct, setOraclePremiumPct] = useState<number>(0);
   const [stage, setStage] = useState<StageName>("Alpha");
   const [valuationUSD, setValuationUSD] = useState<number>(DEFAULT.gov.maxSupplyTokens * DEFAULT.gov.tokenPriceUSD);
@@ -601,18 +634,28 @@ export default function AztecFeeModel_V6(){
   const delegatorAPYPct = delegatorStakeUSD > 0 ? (delegatorNetRewardsUSDPerYear / delegatorStakeUSD) * 100 : 0;
 
   // ---- Per-Prover Economics ----
-  // Per-epoch: on-time provers share the reward pool in proportion to consistency weight c_i^alpha.
-  // Over a year: this prover only claims their share on epochs they actually finish on time
-  // (c_self fraction of epochs), so effective_annual_share = share_when_active × c_self.
-  // This makes consistency affect TOTAL earnings (not just relative split), and makes doubling
-  // provers-of-equal-consistency halve per-prover earnings cleanly.
-  const proverAlpha = Math.max(0, consistencyCurveAlpha);
-  const selfC = Math.max(0, Math.min(1, thisProverConsistencyPct / 100));
-  const otherC = Math.max(0, Math.min(1, otherProversConsistencyPct / 100));
-  const selfWeight = Math.pow(selfC, proverAlpha);
-  const otherWeight = Math.pow(otherC, proverAlpha);
-  const totalWeight = selfWeight + Math.max(0, numProvers - 1) * otherWeight;
-  const proverShareWhenActive = totalWeight > 0 ? selfWeight / totalWeight : 0;
+  // v4 distributes prover rewards by RewardBooster "shares" (RewardBooster.sol _toShares):
+  //   shares(score) = score >= MAX ? K : max(K − A·(MAX−score)²/1e10, MINIMUM)
+  // where a prover's activity `score` rises by INCREMENT each active epoch (capped at MAX) and
+  // decays when idle. We treat the activity-score sliders below as each cohort's steady-state
+  // score (% of MAX), apply the exact quadratic curve, then split the pool by shares.
+  const BOOST_MAX_SCORE = 15_000_000; // RollupConfiguration.getRewardBoostConfiguration()
+  const BOOST_A = 1000;
+  const BOOST_K = 1_000_000;          // shares at/above max score
+  const BOOST_MINIMUM = 100_000;      // share floor
+  const boostShares = (scorePct: number) => {
+    const score = Math.max(0, Math.min(1, scorePct / 100)) * BOOST_MAX_SCORE;
+    if (score >= BOOST_MAX_SCORE) return BOOST_K;
+    const t = BOOST_MAX_SCORE - score;
+    const rhs = (BOOST_A * t * t) / 1e10;
+    return Math.max(BOOST_K - rhs, BOOST_MINIMUM);
+  };
+  const selfC = Math.max(0, Math.min(1, thisProverConsistencyPct / 100)); // activity fraction (also drives participation)
+  const selfShares = boostShares(thisProverConsistencyPct);
+  const otherShares = boostShares(otherProversConsistencyPct);
+  const totalWeight = selfShares + Math.max(0, numProvers - 1) * otherShares;
+  const proverShareWhenActive = totalWeight > 0 ? selfShares / totalWeight : 0;
+  // A prover only claims on epochs it actually proves, so effective annual share scales by activity.
   const proverEffectiveShare = proverShareWhenActive * selfC;
   const proverShareWhenActivePct = proverShareWhenActive * 100;
   const proverEffectiveSharePct = proverEffectiveShare * 100;
@@ -652,9 +695,6 @@ export default function AztecFeeModel_V6(){
   const U = m.blockManaUsed;
   const feeB = m.baseFeePerManaUSD * U;
   const burnB = m.burnPerManaUSD * U;
-  const tipsB = m.tipPerManaUSD * U;
-  const seqCostB = m.seqExecUSDPerBlock_GAS_FIXED + m.proposalBlobUSDPerBlock_FIXED + m.seqBlobUSDPerBlock_VARIABLE;
-  const provCostB = m.proverOnchainUSDPerBlock_FIXED;
 
   const subsidyUSD_tx = m.proverSubsidyUSDPerBlock_FIXED / Math.max(1, m.txPerBlock);
   const nonETHCosts_tx = proverComputeUSDPerTx + subsidyUSD_tx;
@@ -749,7 +789,6 @@ export default function AztecFeeModel_V6(){
     const baseComp = m.baseComponentPerManaUSD_BILLED;
     const mult = m.congestionMultiplier;
     const mana = net.manaPerTx;
-    const tipPct = cong.tipPctOfBase / 100;
     const seqCostPerTx = m.seqFixedUSDPerTx + m.l1USDPerTx_DA;
     const provCostPerTx = m.l1USDPerTx_Verify;
     const feesRetained = m.feeBaseUSD_tx + m.feeTipUSD_tx - m.burnUSD_tx;
@@ -777,14 +816,14 @@ export default function AztecFeeModel_V6(){
         tip.sub = `${fmtUSD(proverComputeUSDPerTx,6)} + ${fmtUSD(m.proverSubsidyUSDPerBlock_FIXED,6)} / ${fmtNum(m.txPerBlock,2)} = ${fmtUSD(proverComputeUSDPerTx + (m.proverSubsidyUSDPerBlock_FIXED/Math.max(1,m.txPerBlock)),6)}`;
       }
     } else if (k === "prov") {
-      tip.eq = "provNetUSD_tx = (baseComponentPerManaUSD_BILLED × proverShare × manaPerTx) − (l1USDPerTx_Verify + proverComputeUSD_tx)";
-      tip.sub = `= (${baseComp.toFixed(8)} × ${(cong.proverShareOfUnburnedBase*100).toFixed(1)}% × ${fmtNum(mana,0)}) − (${fmtUSD(m.l1USDPerTx_Verify,6)} + ${fmtUSD(proverComputeUSDPerTx,6)}) = ${fmtUSD(m.provNetUSD_tx,6)}`;
+      tip.eq = "provNetUSD_tx = toProver (cost-based: min(proverCost, unburnedBase) × manaPerTx) − (l1USDPerTx_Verify + proverComputeUSD_tx)";
+      tip.sub = `toProver/mana=min(proverCost, base)=${fmtUSD(m.toProverPerManaUSD,8)} × ${fmtNum(mana,0)} − (${fmtUSD(m.l1USDPerTx_Verify,6)} + ${fmtUSD(proverComputeUSDPerTx,6)}) = ${fmtUSD(m.provNetUSD_tx,6)}`;
     } else if (k === "seq") {
-      tip.eq = "seqNetUSD_tx = (baseComponentPerManaUSD_BILLED × (1 − proverShare) × manaPerTx + feeTipUSD_tx) − (l1USDPerTx_DA + seqFixedUSDPerTx)";
-      tip.sub = `= (${baseComp.toFixed(8)} × ${(100 - cong.proverShareOfUnburnedBase*100).toFixed(1)}% × ${fmtNum(mana,0)} + ${fmtUSD(m.feeTipUSD_tx,6)}) − (${fmtUSD(m.l1USDPerTx_DA,6)} + ${fmtUSD(m.seqFixedUSDPerTx,6)}) = ${fmtUSD(m.seqNetUSD_tx,6)}`;
+      tip.eq = "seqNetUSD_tx = toSequencer (cost-based residual: unburnedBase − toProver) × manaPerTx − (l1USDPerTx_DA + seqFixedUSDPerTx)";
+      tip.sub = `= ${fmtUSD(m.toSequencerPerManaUSD,8)} × ${fmtNum(mana,0)} − (${fmtUSD(m.l1USDPerTx_DA,6)} + ${fmtUSD(m.seqFixedUSDPerTx,6)}) = ${fmtUSD(m.seqNetUSD_tx,6)}`;
     } else if (k === "pay") {
-      tip.eq = "totalUserFeeUSD_tx = feeBaseUSD_tx + feeTipUSD_tx; feeBaseUSD_tx = baseFeePerManaUSD × manaPerTx; feeTipUSD_tx = baseFeePerManaUSD × tip% × manaPerTx";
-      tip.sub = `= (${fmtUSD(m.baseFeePerManaUSD,8)} × ${fmtNum(mana,0)}) + (${fmtUSD(m.baseFeePerManaUSD,8)} × ${(tipPct*100).toFixed(1)}% × ${fmtNum(mana,0)}) = ${fmtUSD(m.totalUserFeeUSD_tx,6)}`;
+      tip.eq = "totalUserFeeUSD_tx = feeBaseUSD_tx = baseFeePerManaUSD × manaPerTx (no tips in v4)";
+      tip.sub = `= ${fmtUSD(m.baseFeePerManaUSD,8)} × ${fmtNum(mana,0)} = ${fmtUSD(m.totalUserFeeUSD_tx,6)}`;
     } else if (k === "head") {
       tip.eq = "headroomUSD = max(0, userWillingUSD − totalUserFeeUSD_tx)";
       tip.sub = `= max(0, ${fmtUSD(userWillingUSD,4)} − ${fmtUSD(m.totalUserFeeUSD_tx,6)}) = ${fmtUSD(Math.max(0, userWillingUSD - m.totalUserFeeUSD_tx),6)}`;
@@ -1058,11 +1097,17 @@ export default function AztecFeeModel_V6(){
           </div>
           <PercentSlider label="Issuance Share to Sequencers (%)" value={gov.operatorIssuanceSeqSharePct} onChange={(v)=> setGov({ ...gov, operatorIssuanceSeqSharePct: v })} />
           <PercentSlider label="Issuance Share to Provers (%)" value={gov.operatorIssuanceProvSharePct} onChange={(v)=> setGov({ ...gov, operatorIssuanceProvSharePct: v })} />
-          <PercentSlider label="Prover Share of Unburned Base Fee (%)" value={cong.proverShareOfUnburnedBase * 100} onChange={(v) => setCong({ ...cong, proverShareOfUnburnedBase: v / 100 })} disabled={stage==="Ignition"} />
+          <div className="text-[11px] text-slate-500">Note: the seq/prover share above applies to the <b>{fmtNum(gov.checkpointRewardAZTEC,0)} AZTEC issuance reward</b> only. Transaction fees are split cost-based on v4 (prover recovers its cost component, sequencer takes the residual) — not a flat %.</div>
 
           <div className="pt-2 border-t" />
           <CardTitle className="text-sm">Fee Market</CardTitle>
           <NumberSlider label="Minimum Congestion Multiplier" min={1} max={20} step={0.01} value={cong.minMultiplier} onChange={(v) => setCong({ ...cong, minMultiplier: v })} disabled={stage==="Ignition"} />
+          <NumberSlider label="Accumulated Excess Mana (× target)" min={0} max={20} step={0.01} value={cong.excessManaMultiple} onChange={(v) => setCong({ ...cong, excessManaMultiple: v })} disabled={stage==="Ignition"} />
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+            <div>Derived: Congestion multiplier</div><div className="text-right tabular-nums">{fmtNum(m.congestionMultiplier, 4)}×</div>
+            <div>This slot adds to accumulator</div><div className="text-right tabular-nums">{fmtNum(m.instantaneousBlockExcess, 0)} mana</div>
+          </div>
+          <div className="text-[11px] text-slate-500">v4 accumulates excess mana across slots (excess += used − target, floored at 0). At/below target it drains to 0 (multiplier = min); sustained above-target grows unbounded. Set this to explore congested states.</div>
 
           <div className="pt-2 border-t" />
           <CardTitle className="text-sm">L1 Cost Constants</CardTitle>
@@ -1098,7 +1143,6 @@ export default function AztecFeeModel_V6(){
           <NumberSlider label={`User Demanded TPS${stage==="Alpha" ? " (Alpha cap ≈ 1)" : ""}`} min={0} max={stage==="Beta" ? 200 : 5} step={0.01} value={net.tps} onChange={(v) => setNet({ ...net, tps: v })} disabled={stage==="Ignition"} />
           <NumberSlider label="Tx Mana Cost (mana / tx)" min={5_000} max={2_000_000} step={1_000} value={net.manaPerTx} onChange={(v) => setNet({ ...net, manaPerTx: v })} disabled={stage==="Ignition"} />
           <NumberSlider label="Tx DA Size (bytes)" min={200} max={200_000} step={50} value={net.bytesPerTxDA} onChange={(v) => setNet({ ...net, bytesPerTxDA: v })} disabled={stage==="Ignition"} />
-          <PercentSlider label="Tip as % of Base Fee" value={cong.tipPctOfBase} onChange={(v) => setCong({ ...cong, tipPctOfBase: v })} disabled={stage==="Ignition"} />
           <div className="pt-2 border-t" />
           <div className="grid grid-cols-2 gap-2 text-sm">
             <div className="text-slate-500">Derived: Epoch Time</div><div className="text-right font-medium tabular-nums">{fmtNum(m.epochTimeSec, 0)} s</div>
@@ -1139,7 +1183,7 @@ export default function AztecFeeModel_V6(){
       <div className="xl:col-span-7 space-y-6">
         {/* ========== NETWORK OVERVIEW ========== */}
         <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Slot Diagram</CardTitle></CardHeader><CardContent className="space-y-3">
-          <BlockDiagram L={cong.manaTarget*2} T={cong.manaTarget} U={U} fee={feeB} burn={burnB} tips={tipsB} excess={m.excessMana} userPaysB={m.totalUserFeeUSD_tx*m.txPerBlock} right={{
+          <BlockDiagram L={cong.manaTarget*2} T={cong.manaTarget} U={U} fee={feeB} burn={burnB} excess={m.instantaneousBlockExcess} userPaysB={m.totalUserFeeUSD_tx*m.txPerBlock} right={{
             burnB: m.burnUSD_tx*m.txPerBlock,
             paidEthB: m.passThroughFeesToETH_tx*m.txPerBlock,
             nonEthB: (proverComputeUSDPerTx + (m.proverSubsidyUSDPerBlock_FIXED/Math.max(1,m.txPerBlock))) * m.txPerBlock,
@@ -1299,10 +1343,11 @@ export default function AztecFeeModel_V6(){
         <Card className="shadow-sm"><CardHeader className="pb-3"><CardTitle>Per-Prover Economics</CardTitle></CardHeader><CardContent className="space-y-3">
           <div className="grid md:grid-cols-2 gap-3">
             <NumberSlider label="Number of Competing Provers" min={1} max={50} step={1} value={numProvers} onChange={setNumProvers} />
-            <NumberSlider label="Consistency Curve Exponent (α)" min={0} max={5} step={0.1} value={consistencyCurveAlpha} onChange={setConsistencyCurveAlpha} />
-            <PercentSlider label="This Prover's Consistency (on-time epochs %)" value={thisProverConsistencyPct} onChange={setThisProverConsistencyPct} />
-            <PercentSlider label="Other Provers' Avg Consistency (%)" value={otherProversConsistencyPct} onChange={setOtherProversConsistencyPct} />
+            <div />
+            <PercentSlider label="This Prover's Activity Score (% of max)" value={thisProverConsistencyPct} onChange={setThisProverConsistencyPct} />
+            <PercentSlider label="Other Provers' Avg Activity Score (%)" value={otherProversConsistencyPct} onChange={setOtherProversConsistencyPct} />
           </div>
+          <div className="text-[11px] text-slate-500">Reward shares follow v4&apos;s RewardBooster curve: shares = K − A·(maxScore − score)², floored at a minimum. A prover&apos;s activity score rises each epoch it proves (capped) and decays when idle, so consistent provers earn a larger, super-linear share.</div>
           <div className="grid grid-cols-2 gap-2 text-xs text-slate-500 pt-2 border-t">
             <div>Per-Epoch Split (when you&apos;re on-time)</div><div className="text-right tabular-nums">{fmtNum(proverShareWhenActivePct, 2)}% <span className="text-slate-400">(equal-weight: {fmtNum(equalSharePct, 2)}%)</span></div>
             <div>Effective Annual Share (split × consistency)</div><div className="text-right font-medium tabular-nums text-slate-700">{fmtNum(proverEffectiveSharePct, 2)}%</div>
@@ -1336,8 +1381,8 @@ export default function AztecFeeModel_V6(){
           </div>
           <Notes title="Model">
             <div><b>Infrastructure costs excluded.</b> Real ZK-compute costs (GPU rigs, electricity, cooling, ops) are NOT subtracted here. The protocol does bake an oracle-priced compute subsidy ({fmtUSD(proverComputeUSDPerTx, 6)}/tx) into the fee revenue above, so provers are partly compensated; subtract your own actual hardware cost outside the dashboard to get your real margin.</div>
-            <div><b>Reward split.</b> In each epoch, on-time provers split the pool by weight(c) = c<sup>α</sup>. Per-epoch split = w(self) / (w(self) + (N−1) × w(others)). Higher α concentrates rewards toward the most consistent provers.</div>
-            <div><b>Annual effective share = per-epoch split × your consistency.</b> Doubling equally-consistent provers halves per-prover earnings cleanly; with differing consistency, the more consistent prover earns a premium.</div>
+            <div><b>Reward split (v4 RewardBooster).</b> Each prover&apos;s shares = K − A·(maxScore − activityScore)² (floored at a minimum, capped at K for max score). Per-epoch split = selfShares / (selfShares + (N−1)·otherShares). The quadratic penalty means a small activity-score lead yields an outsized share advantage.</div>
+            <div><b>Annual effective share = per-epoch split × activity fraction.</b> A prover only claims on epochs it actually proves, so lower activity scales earnings down proportionally as well as reducing the per-epoch share.</div>
             <div><b>L1 verify.</b> Submission assumed awarded proportionally to effective share — this prover pays {fmtNum(proverEffectiveSharePct, 1)}% of annual on-chain verify gas.</div>
           </Notes>
         </CardContent></Card>
@@ -1403,7 +1448,6 @@ export default function AztecFeeModel_V6(){
             const seqVariableY = seqDaY;
             const seqMarginY = m.seqNetUSD_tx * txPerYear;
             const seqMarginPct = seqRevenueY > 0 ? (seqMarginY / seqRevenueY) * 100 : 0;
-            const seqTipsY = m.feeTipUSD_tx * txPerYear;
             const seqIssuanceY = m.issuanceToSequencersUSDPerBlock * blocksPerYear;
             const seqMarginInclIssY = seqMarginY + seqIssuanceY;
             const seqBaseSharePerTx = m.toSequencerPerManaUSD * net.manaPerTx;
@@ -1426,8 +1470,7 @@ export default function AztecFeeModel_V6(){
                   <div className="font-medium">Sequencer</div>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="text-slate-600">Revenue</div><div></div>
-                    <div className="text-slate-500">- Base share / year</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(seqBaseShareY), 0)} AZTEC <span className="text-slate-400">({fmtUSD(seqBaseShareY,2)})</span></div>
-                    <div className="text-slate-500">- Tips / year</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(seqTipsY), 0)} AZTEC <span className="text-slate-400">({fmtUSD(seqTipsY,2)})</span></div>
+                    <div className="text-slate-500">- Base fee share / year</div><div className="text-right tabular-nums">{fmtNum(toAZTEC(seqBaseShareY), 0)} AZTEC <span className="text-slate-400">({fmtUSD(seqBaseShareY,2)})</span></div>
                     <div className="text-slate-700">Total revenue / year</div><div className="text-right font-medium tabular-nums">{fmtNum(toAZTEC(seqRevenueY), 0)} AZTEC <span className="text-slate-400">({fmtUSD(seqRevenueY,2)})</span></div>
                     <div className="text-slate-600 pt-1">Costs</div><div className="pt-1"></div>
                     <div className="text-slate-500">- DA variable / year</div><div className="text-right tabular-nums">{fmtNum(toETH(seqDaY), 4)} ETH <span className="text-slate-400">({fmtUSD(seqDaY,2)})</span></div>
